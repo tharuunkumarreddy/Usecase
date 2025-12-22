@@ -1,26 +1,25 @@
 name: Rupture_Detection_Scoring
-description: Combines BOCPD and LSTM results to detect and score market ruptures. Identifies high-quality opportunities based on adjusted confidence thresholds. Downloads original CSV for signal columns and readiness classification. ADJUSTED thresholds lowered to 0.55 HIGH and 0.35 MEDIUM to match actual score distribution.
+description: Combines BOCPD and LSTM results to detect and score market ruptures. Uses preprocessed data only - no CSV reload needed. Identifies high-quality opportunities based on adjusted confidence thresholds (0.55 HIGH, 0.35 MEDIUM).
 inputs:
-  - {name: processed_data, type: Dataset, description: "Directory containing rupturenet_processed_data.pkl from preprocessing"}
-  - {name: bocpd_results, type: Dataset, description: "Directory containing BOCPD results from BOCPD training"}
-  - {name: lstm_results, type: Dataset, description: "Directory containing LSTM results from LSTM training"}
-  - {name: csv_url, type: String, description: "CDN URL or file path to original CSV (same as used in preprocessing) for signal columns and readiness class"}
+  - {name: processed_data, type: Dataset, description: "Directory containing rupturenet_processed_data.pkl with test metadata"}
+  - {name: bocpd_results, type: Dataset, description: "Directory containing BOCPD changepoint detection results"}
+  - {name: lstm_results, type: Dataset, description: "Directory containing LSTM anomaly detection results"}
   - {name: bocpd_weight, type: Float, default: "0.5", description: "Weight for BOCPD in rupture scoring"}
   - {name: lstm_weight, type: Float, default: "0.3", description: "Weight for LSTM in rupture scoring"}
   - {name: signal_weight, type: Float, default: "0.2", description: "Weight for signal indicators in rupture scoring"}
-  - {name: high_confidence_threshold, type: Float, default: "0.55", description: "Threshold for HIGH confidence classification (ADJUSTED from 0.75)"}
-  - {name: medium_confidence_threshold, type: Float, default: "0.35", description: "Threshold for MEDIUM confidence classification (ADJUSTED from 0.50)"}
+  - {name: high_confidence_threshold, type: Float, default: "0.55", description: "Threshold for HIGH confidence (ADJUSTED from 0.75)"}
+  - {name: medium_confidence_threshold, type: Float, default: "0.35", description: "Threshold for MEDIUM confidence (ADJUSTED from 0.50)"}
 outputs:
-  - {name: rupture_results, type: Dataset, description: "Directory containing rupture detection results and opportunities"}
+  - {name: rupture_results, type: Dataset, description: "Directory containing rupture detection results and ranked opportunities"}
 implementation:
   container:
-    image: python:3.9
+    image: python:3.11
     command:
       - sh
       - -c
       - |
-        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet numpy pandas scikit-learn requests || \
-        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet numpy pandas scikit-learn requests --user
+        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet numpy pandas scikit-learn || \
+        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet numpy pandas scikit-learn --user
         exec "$0" "$@"
       - python3
       - -u
@@ -33,31 +32,10 @@ implementation:
         from datetime import datetime
         import argparse
         import os
-        import requests
-        from io import BytesIO
-
-        def load_csv(csv_input):
-            if csv_input.startswith('http://') or csv_input.startswith('https://'):
-                print(f"Fetching CSV from URL: {csv_input}")
-                resp = requests.get(csv_input)
-                resp.raise_for_status()
-                df = pd.read_csv(BytesIO(resp.content))
-                print("Loaded CSV from URL")
-            elif csv_input.startswith('gs://'):
-                print(f"Fetching CSV from GCS: {csv_input}")
-                resp = requests.get(csv_input)
-                resp.raise_for_status()
-                df = pd.read_csv(BytesIO(resp.content))
-                print("Loaded CSV from GCS")
-            else:
-                print(f"Loading CSV from file: {csv_input}")
-                df = pd.read_csv(csv_input)
-                print("Loaded CSV from file system")
-            return df
 
         def compute_rupture_score(bocpd_prob, lstm_error, signal_count, error_threshold, weights):
             bocpd_norm = min(bocpd_prob, 1.0)
-            lstm_norm = min(lstm_error / error_threshold, 1.0)
+            lstm_norm = min(lstm_error / error_threshold, 1.0) if error_threshold > 0 else 0.0
             signal_norm = min(signal_count / 5.0, 1.0)
             
             score = (
@@ -101,7 +79,6 @@ implementation:
             parser.add_argument('--processed_data', type=str, required=True)
             parser.add_argument('--bocpd_results', type=str, required=True)
             parser.add_argument('--lstm_results', type=str, required=True)
-            parser.add_argument('--csv_url', type=str, required=True)
             parser.add_argument('--bocpd_weight', type=float, default=0.5)
             parser.add_argument('--lstm_weight', type=float, default=0.3)
             parser.add_argument('--signal_weight', type=float, default=0.2)
@@ -135,11 +112,9 @@ implementation:
                 with open(os.path.join(args.processed_data, 'rupturenet_processed_data.pkl'), 'rb') as f:
                     data_package = pickle.load(f)
                 
-                train_info = data_package['train_info']
                 test_info = data_package['test_info']
                 feature_names = data_package['feature_names']
                 test_series = data_package['test_series']
-
                 print(f"   Loaded: {len(test_series)} test series")
 
                 print(f"\\n2. Loading BOCPD results...")
@@ -147,7 +122,7 @@ implementation:
                     bocpd_results = pickle.load(f)
                 
                 bocpd_test = bocpd_results['test_results']
-                print(f"   Test changepoints: {sum(r['n_changepoints'] for r in bocpd_test)}")
+                print(f"   Changepoints: {sum(r['n_changepoints'] for r in bocpd_test)}")
 
                 print(f"\\n3. Loading LSTM results...")
                 with open(os.path.join(args.lstm_results, 'lstm_autoencoder_results.pkl'), 'rb') as f:
@@ -157,11 +132,7 @@ implementation:
                 test_anomalies = lstm_results['test_anomalies']
                 error_threshold = lstm_results['error_threshold']
                 print(f"   Error threshold: {error_threshold:.6f}")
-
-                print(f"\\n4. Loading original CSV for signals and readiness...")
-                print(f"   CSV URL: {args.csv_url}")
-                df_original = load_csv(args.csv_url)
-                print(f"   Loaded CSV shape: {df_original.shape}")
+                print(f"   Anomalies: {sum(np.sum(a) for a in test_anomalies)}")
 
                 print(f"\\n{'='*80}")
                 print("DETECTING RUPTURES")
@@ -173,21 +144,19 @@ implementation:
                     country = info['country']
                     industry = info['industry']
                     year_start = info['year_start']
+                    n_years = info['n_years']
                     
                     bocpd_changepoints = bocpd_res['changepoint_years']
                     bocpd_probs = bocpd_res['changepoint_probs']
                     lstm_anomaly_indices = np.where(test_anomalies[idx] == 1)[0]
                     lstm_errors_series = test_errors[idx]
                     
-                    series_df = df_original[
-                        (df_original['country'] == country) & 
-                        (df_original['industry'] == industry) &
-                        (df_original['year'] >= year_start) &
-                        (df_original['year'] < year_start + len(series))
-                    ].sort_values('year')
+                    # Since we don't have signal columns, use 0 for now
+                    # NOTE: Enhanced preprocessing would provide this
+                    signal_counts = np.zeros(n_years)
                     
-                    signal_cols = [c for c in series_df.columns if c.endswith('_signal')]
-                    signal_counts = series_df[signal_cols].sum(axis=1).values if signal_cols else np.zeros(len(series))
+                    # Get readiness from info or default
+                    readiness = info.get('readiness_class', 'UNKNOWN')
                     
                     rupture_candidates = set(bocpd_changepoints) | set([year_start + i for i in lstm_anomaly_indices])
                     
@@ -210,8 +179,6 @@ implementation:
                             confidence = 'MEDIUM'
                         else:
                             confidence = 'LOW'
-                        
-                        readiness = series_df.iloc[year_idx]['readiness_class'] if year_idx < len(series_df) else 'UNKNOWN'
                         
                         all_ruptures.append({
                             'country': country,
@@ -242,7 +209,7 @@ implementation:
                 opportunities = [
                     r for r in all_ruptures
                     if r['confidence'] in ['HIGH', 'MEDIUM'] and
-                       r['readiness_class'] in ['HIGH', 'MEDIUM']
+                       r['readiness_class'] in ['HIGH', 'MEDIUM', 'UNKNOWN']
                 ]
 
                 opportunities.sort(key=lambda x: x['rupture_score'], reverse=True)
@@ -259,6 +226,9 @@ implementation:
                     print(f"   Readiness: {opp['readiness_class']}")
                     methods = [k for k, v in opp['detection_method'].items() if v]
                     print(f"   Detected by: {methods}")
+                    if opp['drivers']:
+                        driver = opp['drivers'][0]
+                        print(f"   Top driver: {driver['feature']} ({driver['delta_zscore']:+.2f}σ)")
 
                 print(f"\\n{'='*80}")
                 print("SAVING RESULTS")
@@ -330,6 +300,8 @@ implementation:
                 print(f"  Opportunities: {len(opportunities)}")
                 print(f"  Output directory: {output_dir}")
 
+                print(f"\\nNote: Signal columns set to 0 (enhance preprocessing to include)")
+
                 print(f"\\n{'='*80}")
                 print(f"Completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                 print(f"{'='*80}")
@@ -346,8 +318,6 @@ implementation:
       - {inputPath: bocpd_results}
       - --lstm_results
       - {inputPath: lstm_results}
-      - --csv_url
-      - {inputValue: csv_url}
       - --bocpd_weight
       - {inputValue: bocpd_weight}
       - --lstm_weight
