@@ -19,10 +19,7 @@ implementation:
       - sh
       - -c
       - |
-        # Install packages separately with proper indexes
-        # First install numpy, pandas, scikit-learn from standard PyPI
         pip3 install --no-cache-dir numpy pandas scikit-learn tqdm matplotlib
-        # Then install PyTorch CPU version
         pip3 install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
         exec "$0" "$@"
       - python3
@@ -188,19 +185,20 @@ implementation:
                 print("="*80)
                 print("RUPTURENET-CPD: LSTM AUTOENCODER TRAINING")
                 print("="*80)
-                print(f"\nStarted: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-                print(f"Using device: {device}")
-                print(f"PyTorch version: {torch.__version__}")
-                print(f"NumPy version: {np.__version__}")
+                
+                now = datetime.now()
+                print("\\nStarted:", now.strftime("%Y-%m-%d %H:%M:%S"))
+                print("Using device:", device)
+                print("PyTorch version:", torch.__version__)
 
-                print(f"\n{'='*80}")
+                print("\\n" + "="*80)
                 print("LOADING PREPROCESSED DATA")
-                print(f"{'='*80}")
+                print("="*80)
 
                 processed_data_path = os.path.join(args.processed_data, 'rupturenet_processed_data.pkl')
                 
                 if not os.path.exists(processed_data_path):
-                    raise FileNotFoundError(f"Data file not found: {processed_data_path}")
+                    raise FileNotFoundError("Data file not found: " + processed_data_path)
                 
                 with open(processed_data_path, 'rb') as f:
                     data_package = pickle.load(f)
@@ -211,10 +209,10 @@ implementation:
 
                 input_dim = len(feature_names)
 
-                print(f"\nLoaded:")
-                print(f"  Training series: {len(train_series)}")
-                print(f"  Test series: {len(test_series)}")
-                print(f"  Features: {input_dim}")
+                print("\\nLoaded:")
+                print("  Training series:", len(train_series))
+                print("  Test series:", len(test_series))
+                print("  Features:", input_dim)
 
                 train_dataset = TimeSeriesDataset(train_series)
                 test_dataset = TimeSeriesDataset(test_series)
@@ -235,13 +233,13 @@ implementation:
                     num_workers=0
                 )
 
-                print(f"\nCreated dataloaders:")
-                print(f"  Train batches: {len(train_loader)}")
-                print(f"  Test batches: {len(test_loader)}")
+                print("\\nCreated dataloaders:")
+                print("  Train batches:", len(train_loader))
+                print("  Test batches:", len(test_loader))
 
-                print(f"\n{'='*80}")
+                print("\\n" + "="*80)
                 print("CREATING MODEL")
-                print(f"{'='*80}")
+                print("="*80)
 
                 model = LSTMAutoencoder(
                     input_dim=input_dim,
@@ -251,14 +249,14 @@ implementation:
                     dropout=args.dropout
                 ).to(device)
 
-                print(f"\nModel created:")
-                print(f"  Input dim: {input_dim}")
-                print(f"  Hidden dim: {args.hidden_dim}")
-                print(f"  Latent dim: {args.latent_dim}")
-                print(f"  Num layers: {args.num_layers}")
+                print("\\nModel created:")
+                print("  Input dim:", input_dim)
+                print("  Hidden dim:", args.hidden_dim)
+                print("  Latent dim:", args.latent_dim)
+                print("  Num layers:", args.num_layers)
 
                 total_params = sum(p.numel() for p in model.parameters())
-                print(f"  Total parameters: {total_params:,}")
+                print("  Total parameters:", total_params)
 
                 criterion = nn.MSELoss()
                 optimizer = optim.AdamW(
@@ -271,9 +269,9 @@ implementation:
                     optimizer, mode='min', factor=0.5, patience=5
                 )
 
-                print(f"\n{'='*80}")
+                print("\\n" + "="*80)
                 print("TRAINING")
-                print(f"{'='*80}")
+                print("="*80)
 
                 output_dir = args.lstm_results
                 os.makedirs(output_dir, exist_ok=True)
@@ -296,8 +294,8 @@ implementation:
                     
                     scheduler.step(val_loss)
                     
-                    print(f"Epoch {epoch+1}/{args.num_epochs}: "
-                          f"Train Loss = {train_loss:.6f}, Val Loss = {val_loss:.6f}")
+                    msg = "Epoch {}/{}: Train Loss = {:.6f}, Val Loss = {:.6f}"
+                    print(msg.format(epoch+1, args.num_epochs, train_loss, val_loss))
                     
                     if val_loss < best_val_loss - min_delta:
                         best_val_loss = val_loss
@@ -317,18 +315,18 @@ implementation:
                                 'anomaly_threshold': args.anomaly_threshold
                             }
                         }, best_model_path)
-                        print(f"  ✓ Saved best model (val_loss: {val_loss:.6f})")
+                        print("  Saved best model (val_loss: {:.6f})".format(val_loss))
                     else:
                         patience_counter += 1
                         if patience_counter >= patience:
-                            print(f"\nEarly stopping triggered after {epoch+1} epochs")
+                            print("\\nEarly stopping triggered after {} epochs".format(epoch+1))
                             break
 
-                print(f"\nTraining complete! Best validation loss: {best_val_loss:.6f}")
+                print("\\nTraining complete! Best validation loss: {:.6f}".format(best_val_loss))
 
-                print(f"\n{'='*80}")
+                print("\\n" + "="*80)
                 print("COMPUTING RECONSTRUCTION ERRORS")
-                print(f"{'='*80}")
+                print("="*80)
 
                 checkpoint = torch.load(best_model_path, map_location=device)
                 model.load_state_dict(checkpoint['model_state_dict'])
@@ -336,7 +334,7 @@ implementation:
 
                 train_errors = []
 
-                print("\nComputing train errors...")
+                print("\\nComputing train errors...")
                 with torch.no_grad():
                     for series in tqdm(train_series, desc="Train errors"):
                         series_tensor = torch.FloatTensor(series).unsqueeze(0).to(device)
@@ -352,15 +350,15 @@ implementation:
 
                 anomaly_threshold = error_mean + args.anomaly_threshold * error_std
 
-                print(f"\nReconstruction error statistics:")
-                print(f"  Mean: {error_mean:.6f}")
-                print(f"  Std: {error_std:.6f}")
-                print(f"  Anomaly threshold ({args.anomaly_threshold}σ): {anomaly_threshold:.6f}")
+                print("\\nReconstruction error statistics:")
+                print("  Mean: {:.6f}".format(error_mean))
+                print("  Std: {:.6f}".format(error_std))
+                print("  Anomaly threshold ({}sigma): {:.6f}".format(args.anomaly_threshold, anomaly_threshold))
 
                 test_errors = []
                 test_anomalies = []
 
-                print("\nComputing test errors...")
+                print("\\nComputing test errors...")
                 with torch.no_grad():
                     for series in tqdm(test_series, desc="Test errors"):
                         series_tensor = torch.FloatTensor(series).unsqueeze(0).to(device)
@@ -374,12 +372,12 @@ implementation:
                         test_anomalies.append(anomalies)
 
                 total_test_anomalies = sum(np.sum(a) for a in test_anomalies)
-                print(f"\n✓ Test reconstruction computed for {len(test_errors)} series")
-                print(f"  Total test anomalies detected: {total_test_anomalies}")
+                print("\\nTest reconstruction computed for {} series".format(len(test_errors)))
+                print("  Total test anomalies detected:", total_test_anomalies)
 
-                print(f"\n{'='*80}")
+                print("\\n" + "="*80)
                 print("SAVING RESULTS")
-                print(f"{'='*80}")
+                print("="*80)
 
                 results = {
                     'config': {
@@ -407,7 +405,7 @@ implementation:
                 results_path = os.path.join(output_dir, 'lstm_autoencoder_results.pkl')
                 with open(results_path, 'wb') as f:
                     pickle.dump(results, f)
-                print(f"\n✓ Saved: {results_path}")
+                print("\\nSaved:", results_path)
 
                 summary = {
                     'model': 'LSTM Autoencoder',
@@ -435,9 +433,8 @@ implementation:
                 summary_path = os.path.join(output_dir, 'lstm_autoencoder_summary.json')
                 with open(summary_path, 'w') as f:
                     json.dump(summary, f, indent=2)
-                print(f"✓ Saved: {summary_path}")
+                print("Saved:", summary_path)
 
-                # Save training curve plot
                 try:
                     plt.figure(figsize=(10, 6))
                     plt.plot(train_losses, label='Train Loss', linewidth=2)
@@ -450,45 +447,45 @@ implementation:
                     plot_path = os.path.join(output_dir, 'lstm_training_curve.png')
                     plt.savefig(plot_path, dpi=150, bbox_inches='tight')
                     plt.close()
-                    print(f"✓ Saved: {plot_path}")
+                    print("Saved:", plot_path)
                 except Exception as e:
-                    print(f"Warning: Could not save plot: {e}")
+                    print("Warning: Could not save plot:", str(e))
 
-                print(f"\n{'='*80}")
-                print("✓ LSTM AUTOENCODER TRAINING COMPLETE")
-                print(f"{'='*80}")
+                print("\\n" + "="*80)
+                print("LSTM AUTOENCODER TRAINING COMPLETE")
+                print("="*80)
 
-                print(f"\nSummary:")
-                print(f"  Epochs trained: {len(train_losses)}")
-                print(f"  Best val loss: {best_val_loss:.6f}")
-                print(f"  Test anomalies: {total_test_anomalies}")
-                print(f"  Output directory: {output_dir}")
+                print("\\nSummary:")
+                print("  Epochs trained:", len(train_losses))
+                print("  Best val loss: {:.6f}".format(best_val_loss))
+                print("  Test anomalies:", total_test_anomalies)
+                print("  Output directory:", output_dir)
 
-                # Verify all files were created
                 expected_files = [
                     'lstm_autoencoder_best.pth',
                     'lstm_autoencoder_results.pkl',
                     'lstm_autoencoder_summary.json'
                 ]
                 
-                print(f"\nVerifying output files:")
+                print("\\nVerifying output files:")
                 for filename in expected_files:
                     filepath = os.path.join(output_dir, filename)
                     if os.path.exists(filepath):
                         size = os.path.getsize(filepath)
-                        print(f"  ✓ {filename} ({size:,} bytes)")
+                        print("  OK {0} ({1} bytes)".format(filename, size))
                     else:
-                        print(f"  ✗ {filename} MISSING!")
+                        print("  MISSING:", filename)
 
-                print(f"\n{'='*80}")
-                print(f"Completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-                print(f"{'='*80}")
+                end_time = datetime.now()
+                print("\\n" + "="*80)
+                print("Completed:", end_time.strftime("%Y-%m-%d %H:%M:%S"))
+                print("="*80)
                 
             except Exception as e:
-                print(f"\n{'='*80}")
+                print("\\n" + "="*80)
                 print("ERROR OCCURRED")
-                print(f"{'='*80}")
-                print(f"\nError: {e}")
+                print("="*80)
+                print("\\nError:", str(e))
                 import traceback
                 traceback.print_exc()
                 raise
