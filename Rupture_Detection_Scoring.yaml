@@ -1,10 +1,10 @@
 name: Rupture_Detection_Scoring
-description: Combines BOCPD and LSTM results to detect and score market ruptures. Identifies high-quality opportunities based on adjusted confidence thresholds. ADJUSTED thresholds lowered to 0.55 HIGH and 0.35 MEDIUM to match actual score distribution.
+description: Combines BOCPD and LSTM results to detect and score market ruptures. Identifies high-quality opportunities based on adjusted confidence thresholds. Downloads original CSV for signal columns and readiness classification. ADJUSTED thresholds lowered to 0.55 HIGH and 0.35 MEDIUM to match actual score distribution.
 inputs:
   - {name: processed_data, type: Dataset, description: "Directory containing rupturenet_processed_data.pkl from preprocessing"}
   - {name: bocpd_results, type: Dataset, description: "Directory containing BOCPD results from BOCPD training"}
   - {name: lstm_results, type: Dataset, description: "Directory containing LSTM results from LSTM training"}
-  - {name: original_csv, type: String, description: "Path or URL to original CSV file with features"}
+  - {name: csv_url, type: String, description: "CDN URL or file path to original CSV (same as used in preprocessing) for signal columns and readiness class"}
   - {name: bocpd_weight, type: Float, default: "0.5", description: "Weight for BOCPD in rupture scoring"}
   - {name: lstm_weight, type: Float, default: "0.3", description: "Weight for LSTM in rupture scoring"}
   - {name: signal_weight, type: Float, default: "0.2", description: "Weight for signal indicators in rupture scoring"}
@@ -42,13 +42,17 @@ implementation:
                 resp = requests.get(csv_input)
                 resp.raise_for_status()
                 df = pd.read_csv(BytesIO(resp.content))
+                print("Loaded CSV from URL")
             elif csv_input.startswith('gs://'):
                 print(f"Fetching CSV from GCS: {csv_input}")
                 resp = requests.get(csv_input)
                 resp.raise_for_status()
                 df = pd.read_csv(BytesIO(resp.content))
+                print("Loaded CSV from GCS")
             else:
+                print(f"Loading CSV from file: {csv_input}")
                 df = pd.read_csv(csv_input)
+                print("Loaded CSV from file system")
             return df
 
         def compute_rupture_score(bocpd_prob, lstm_error, signal_count, error_threshold, weights):
@@ -97,7 +101,7 @@ implementation:
             parser.add_argument('--processed_data', type=str, required=True)
             parser.add_argument('--bocpd_results', type=str, required=True)
             parser.add_argument('--lstm_results', type=str, required=True)
-            parser.add_argument('--original_csv', type=str, required=True)
+            parser.add_argument('--csv_url', type=str, required=True)
             parser.add_argument('--bocpd_weight', type=float, default=0.5)
             parser.add_argument('--lstm_weight', type=float, default=0.3)
             parser.add_argument('--signal_weight', type=float, default=0.2)
@@ -127,6 +131,7 @@ implementation:
                 print("LOADING DATA")
                 print(f"{'='*80}")
 
+                print(f"\\n1. Loading preprocessed data...")
                 with open(os.path.join(args.processed_data, 'rupturenet_processed_data.pkl'), 'rb') as f:
                     data_package = pickle.load(f)
                 
@@ -135,28 +140,28 @@ implementation:
                 feature_names = data_package['feature_names']
                 test_series = data_package['test_series']
 
-                print(f"\\nLoaded preprocessed data")
+                print(f"   Loaded: {len(test_series)} test series")
 
+                print(f"\\n2. Loading BOCPD results...")
                 with open(os.path.join(args.bocpd_results, 'bocpd_results.pkl'), 'rb') as f:
                     bocpd_results = pickle.load(f)
                 
                 bocpd_test = bocpd_results['test_results']
+                print(f"   Test changepoints: {sum(r['n_changepoints'] for r in bocpd_test)}")
 
-                print(f"\\nLoaded BOCPD results:")
-                print(f"  Test changepoints: {sum(r['n_changepoints'] for r in bocpd_test)}")
-
+                print(f"\\n3. Loading LSTM results...")
                 with open(os.path.join(args.lstm_results, 'lstm_autoencoder_results.pkl'), 'rb') as f:
                     lstm_results = pickle.load(f)
                 
                 test_errors = lstm_results['test_errors']
                 test_anomalies = lstm_results['test_anomalies']
                 error_threshold = lstm_results['error_threshold']
+                print(f"   Error threshold: {error_threshold:.6f}")
 
-                print(f"\\nLoaded LSTM results:")
-                print(f"  Error threshold: {error_threshold:.6f}")
-
-                df_original = load_csv(args.original_csv)
-                print(f"\\nLoaded original CSV: {df_original.shape}")
+                print(f"\\n4. Loading original CSV for signals and readiness...")
+                print(f"   CSV URL: {args.csv_url}")
+                df_original = load_csv(args.csv_url)
+                print(f"   Loaded CSV shape: {df_original.shape}")
 
                 print(f"\\n{'='*80}")
                 print("DETECTING RUPTURES")
@@ -341,8 +346,8 @@ implementation:
       - {inputPath: bocpd_results}
       - --lstm_results
       - {inputPath: lstm_results}
-      - --original_csv
-      - {inputValue: original_csv}
+      - --csv_url
+      - {inputValue: csv_url}
       - --bocpd_weight
       - {inputValue: bocpd_weight}
       - --lstm_weight
