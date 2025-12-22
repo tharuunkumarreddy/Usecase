@@ -14,7 +14,7 @@ outputs:
   - {name: rupture_results, type: Dataset, description: "Directory containing rupture detection results and opportunities"}
 implementation:
   container:
-    image: python:3.11
+    image: python:3.9
     command:
       - sh
       - -c
