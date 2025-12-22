@@ -1,7 +1,7 @@
 name: RuptureNet_Data_Preprocessing
-description: RuptureNet-CPD Data Preprocessing Component - Prepares time series data for BOCPD and LSTM training. Features automatic outlier handling, time series filtering, train/test split, StandardScaler normalization. CRITICAL FIX Uses StandardScaler instead of RobustScaler for perfect normalization.
+description: RuptureNet-CPD Data Preprocessing Component - Prepares time series data for BOCPD and LSTM training. Supports both CDN URLs and file paths. Features automatic outlier handling, time series filtering, train/test split, StandardScaler normalization. CRITICAL FIX Uses StandardScaler instead of RobustScaler for perfect normalization.
 inputs:
-  - {name: csv_file, type: String, description: "Path or URL to input CSV file with rupturenet features"}
+  - {name: csv_url, type: String, description: "CDN URL or file path to input CSV file with rupturenet features"}
   - {name: min_years, type: Integer, default: "15", description: "Minimum number of years required for a valid time series"}
   - {name: test_split_pct, type: Float, default: "0.15", description: "Percentage of data to use for test set"}
   - {name: outlier_log_threshold, type: Float, default: "1000.0", description: "Range threshold for applying log transformation"}
@@ -15,8 +15,8 @@ implementation:
       - sh
       - -c
       - |
-        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet pandas numpy scikit-learn || \
-        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet pandas numpy scikit-learn --user
+        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet pandas numpy scikit-learn requests || \
+        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet pandas numpy scikit-learn requests --user
         exec "$0" "$@"
       - python3
       - -u
@@ -31,6 +31,8 @@ implementation:
         import warnings
         import argparse
         import os
+        import requests
+        from io import BytesIO
         warnings.filterwarnings('ignore')
 
         CORE_FEATURES = [
@@ -44,6 +46,31 @@ implementation:
             'patent_intensity_pct_change_1y', 'trade_shock_signal',
             'innovation_surge_signal', 'fdi_shock_signal', 'composite_rupture_signal',
         ]
+
+        def download_csv_from_url(url):
+            print(f"Fetching CSV from URL: {url}")
+            resp = requests.get(url)
+            resp.raise_for_status()
+            print(f"Successfully downloaded CSV data")
+            return resp.content
+
+        def load_csv(csv_input):
+            if csv_input.startswith('http://') or csv_input.startswith('https://'):
+                print(f"Detected URL input: {csv_input}")
+                csv_content = download_csv_from_url(csv_input)
+                df = pd.read_csv(BytesIO(csv_content))
+                print(f"Loaded CSV from URL")
+            elif csv_input.startswith('gs://'):
+                print(f"Detected GCS path: {csv_input}")
+                print(f"Note: For GCS paths, ensure file is accessible or use signed URL")
+                csv_content = download_csv_from_url(csv_input)
+                df = pd.read_csv(BytesIO(csv_content))
+                print(f"Loaded CSV from GCS")
+            else:
+                print(f"Detected file path: {csv_input}")
+                df = pd.read_csv(csv_input)
+                print(f"Loaded CSV from file system")
+            return df
 
         def create_tensors(df, feature_cols, label='train'):
             series_data = []
@@ -70,7 +97,7 @@ implementation:
 
         if __name__ == "__main__":
             parser = argparse.ArgumentParser()
-            parser.add_argument('--csv_file', type=str, required=True)
+            parser.add_argument('--csv_url', type=str, required=True)
             parser.add_argument('--min_years', type=int, default=15)
             parser.add_argument('--test_split_pct', type=float, default=0.15)
             parser.add_argument('--outlier_log_threshold', type=float, default=1000.0)
@@ -84,14 +111,13 @@ implementation:
                 print("="*80)
                 print(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-                csv_path = args.csv_file
-                print(f"\\nInput CSV: {csv_path}")
-
                 print(f"\\n{'='*80}")
                 print("LOADING DATASET")
                 print(f"{'='*80}")
 
-                df = pd.read_csv(csv_path)
+                print(f"\\nInput: {args.csv_url}")
+                df = load_csv(args.csv_url)
+                
                 print(f"\\nLoaded: {df.shape}")
                 print(f"Columns: {list(df.columns)[:10]}...")
 
@@ -213,7 +239,6 @@ implementation:
                 print("STANDARDIZATION (CRITICAL FIX)")
                 print(f"{'='*80}")
 
-                # CRITICAL: StandardScaler for perfect normalization
                 scaler = StandardScaler()
 
                 print(f"\\nBefore scaling (train):")
@@ -302,6 +327,7 @@ implementation:
                 print(f"{'='*80}")
 
                 print(f"\\nSummary:")
+                print(f"  Input type: {'URL' if args.csv_url.startswith(('http://', 'https://', 'gs://')) else 'File path'}")
                 print(f"  Features: {len(feature_cols)}")
                 print(f"  Log-transformed: {len(log_transformed)}")
                 print(f"  Clipped: {len(clipped)}")
@@ -321,8 +347,8 @@ implementation:
                 traceback.print_exc()
                 raise
     args:
-      - --csv_file
-      - {inputValue: csv_file}
+      - --csv_url
+      - {inputValue: csv_url}
       - --min_years
       - {inputValue: min_years}
       - --test_split_pct
