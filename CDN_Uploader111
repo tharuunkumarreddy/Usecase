@@ -3,7 +3,7 @@ description: Uploads a specific file from a directory to CDN. Can target files b
 inputs:
   - {name: file_to_upload, description: "Path to the file/directory to upload"}
   - {name: bearer_token, type: string, description: "Bearer token for authentication"}
-  - {name: target_filename, type: String, default: "rupturenet_processed_data.pkl", description: "Specific filename to upload from directory"}
+  - {name: target_filename, type: String, description: "Specific filename to upload from directory"}
 outputs:
   - {name: cdn_url_out, type: String, description: "CDN URL where the uploaded file is accessible"}
 implementation:
