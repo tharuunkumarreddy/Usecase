@@ -1,0 +1,357 @@
+name: Rupture_Detection_Scoring
+description: Combines BOCPD and LSTM results to detect and score market ruptures. Identifies high-quality opportunities based on adjusted confidence thresholds. ADJUSTED thresholds lowered to 0.55 HIGH and 0.35 MEDIUM to match actual score distribution.
+inputs:
+  - {name: processed_data, type: Dataset, description: "Directory containing rupturenet_processed_data.pkl from preprocessing"}
+  - {name: bocpd_results, type: Dataset, description: "Directory containing BOCPD results from BOCPD training"}
+  - {name: lstm_results, type: Dataset, description: "Directory containing LSTM results from LSTM training"}
+  - {name: original_csv, type: String, description: "Path or URL to original CSV file with features"}
+  - {name: bocpd_weight, type: Float, default: "0.5", description: "Weight for BOCPD in rupture scoring"}
+  - {name: lstm_weight, type: Float, default: "0.3", description: "Weight for LSTM in rupture scoring"}
+  - {name: signal_weight, type: Float, default: "0.2", description: "Weight for signal indicators in rupture scoring"}
+  - {name: high_confidence_threshold, type: Float, default: "0.55", description: "Threshold for HIGH confidence classification (ADJUSTED from 0.75)"}
+  - {name: medium_confidence_threshold, type: Float, default: "0.35", description: "Threshold for MEDIUM confidence classification (ADJUSTED from 0.50)"}
+outputs:
+  - {name: rupture_results, type: Dataset, description: "Directory containing rupture detection results and opportunities"}
+implementation:
+  container:
+    image: python:3.9
+    command:
+      - sh
+      - -c
+      - |
+        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet numpy pandas scikit-learn requests || \
+        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet numpy pandas scikit-learn requests --user
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import numpy as np
+        import pandas as pd
+        import pickle
+        import json
+        from datetime import datetime
+        import argparse
+        import os
+        import requests
+        from io import BytesIO
+
+        def load_csv(csv_input):
+            if csv_input.startswith('http://') or csv_input.startswith('https://'):
+                print(f"Fetching CSV from URL: {csv_input}")
+                resp = requests.get(csv_input)
+                resp.raise_for_status()
+                df = pd.read_csv(BytesIO(resp.content))
+            elif csv_input.startswith('gs://'):
+                print(f"Fetching CSV from GCS: {csv_input}")
+                resp = requests.get(csv_input)
+                resp.raise_for_status()
+                df = pd.read_csv(BytesIO(resp.content))
+            else:
+                df = pd.read_csv(csv_input)
+            return df
+
+        def compute_rupture_score(bocpd_prob, lstm_error, signal_count, error_threshold, weights):
+            bocpd_norm = min(bocpd_prob, 1.0)
+            lstm_norm = min(lstm_error / error_threshold, 1.0)
+            signal_norm = min(signal_count / 5.0, 1.0)
+            
+            score = (
+                weights['bocpd'] * bocpd_norm +
+                weights['lstm'] * lstm_norm +
+                weights['signal'] * signal_norm
+            )
+            
+            return score
+
+        def identify_drivers(series_data, feature_names, year_idx, window=3, top_k=5):
+            T, F = series_data.shape
+            
+            before_start = max(0, year_idx - window)
+            before_end = year_idx
+            after_start = year_idx
+            after_end = min(T, year_idx + window)
+            
+            if before_end <= before_start or after_end <= after_start:
+                return []
+            
+            before_mean = np.mean(series_data[before_start:before_end], axis=0)
+            after_mean = np.mean(series_data[after_start:after_end], axis=0)
+            series_std = np.std(series_data, axis=0) + 1e-6
+            delta_zscore = (after_mean - before_mean) / series_std
+            
+            drivers = []
+            for f_idx, (feat, delta) in enumerate(zip(feature_names, delta_zscore)):
+                if np.abs(delta) > 1.0:
+                    drivers.append({
+                        'feature': feat,
+                        'delta_zscore': float(delta),
+                        'direction': 'increase' if delta > 0 else 'decrease'
+                    })
+            
+            drivers.sort(key=lambda x: abs(x['delta_zscore']), reverse=True)
+            return drivers[:top_k]
+
+        if __name__ == "__main__":
+            parser = argparse.ArgumentParser()
+            parser.add_argument('--processed_data', type=str, required=True)
+            parser.add_argument('--bocpd_results', type=str, required=True)
+            parser.add_argument('--lstm_results', type=str, required=True)
+            parser.add_argument('--original_csv', type=str, required=True)
+            parser.add_argument('--bocpd_weight', type=float, default=0.5)
+            parser.add_argument('--lstm_weight', type=float, default=0.3)
+            parser.add_argument('--signal_weight', type=float, default=0.2)
+            parser.add_argument('--high_confidence_threshold', type=float, default=0.55)
+            parser.add_argument('--medium_confidence_threshold', type=float, default=0.35)
+            parser.add_argument('--rupture_results', type=str, required=True)
+            args = parser.parse_args()
+
+            try:
+                print("="*80)
+                print("RUPTURENET-CPD: RUPTURE DETECTION & SCORING")
+                print("="*80)
+                print(f"\\nStarted: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+                weights = {
+                    'bocpd': args.bocpd_weight,
+                    'lstm': args.lstm_weight,
+                    'signal': args.signal_weight
+                }
+
+                print(f"\\nConfiguration:")
+                print(f"  Weights: BOCPD={weights['bocpd']}, LSTM={weights['lstm']}, Signal={weights['signal']}")
+                print(f"  HIGH confidence: >={args.high_confidence_threshold}")
+                print(f"  MEDIUM confidence: >={args.medium_confidence_threshold}")
+
+                print(f"\\n{'='*80}")
+                print("LOADING DATA")
+                print(f"{'='*80}")
+
+                with open(os.path.join(args.processed_data, 'rupturenet_processed_data.pkl'), 'rb') as f:
+                    data_package = pickle.load(f)
+                
+                train_info = data_package['train_info']
+                test_info = data_package['test_info']
+                feature_names = data_package['feature_names']
+                test_series = data_package['test_series']
+
+                print(f"\\nLoaded preprocessed data")
+
+                with open(os.path.join(args.bocpd_results, 'bocpd_results.pkl'), 'rb') as f:
+                    bocpd_results = pickle.load(f)
+                
+                bocpd_test = bocpd_results['test_results']
+
+                print(f"\\nLoaded BOCPD results:")
+                print(f"  Test changepoints: {sum(r['n_changepoints'] for r in bocpd_test)}")
+
+                with open(os.path.join(args.lstm_results, 'lstm_autoencoder_results.pkl'), 'rb') as f:
+                    lstm_results = pickle.load(f)
+                
+                test_errors = lstm_results['test_errors']
+                test_anomalies = lstm_results['test_anomalies']
+                error_threshold = lstm_results['error_threshold']
+
+                print(f"\\nLoaded LSTM results:")
+                print(f"  Error threshold: {error_threshold:.6f}")
+
+                df_original = load_csv(args.original_csv)
+                print(f"\\nLoaded original CSV: {df_original.shape}")
+
+                print(f"\\n{'='*80}")
+                print("DETECTING RUPTURES")
+                print(f"{'='*80}")
+
+                all_ruptures = []
+
+                for idx, (bocpd_res, series, info) in enumerate(zip(bocpd_test, test_series, test_info)):
+                    country = info['country']
+                    industry = info['industry']
+                    year_start = info['year_start']
+                    
+                    bocpd_changepoints = bocpd_res['changepoint_years']
+                    bocpd_probs = bocpd_res['changepoint_probs']
+                    lstm_anomaly_indices = np.where(test_anomalies[idx] == 1)[0]
+                    lstm_errors_series = test_errors[idx]
+                    
+                    series_df = df_original[
+                        (df_original['country'] == country) & 
+                        (df_original['industry'] == industry) &
+                        (df_original['year'] >= year_start) &
+                        (df_original['year'] < year_start + len(series))
+                    ].sort_values('year')
+                    
+                    signal_cols = [c for c in series_df.columns if c.endswith('_signal')]
+                    signal_counts = series_df[signal_cols].sum(axis=1).values if signal_cols else np.zeros(len(series))
+                    
+                    rupture_candidates = set(bocpd_changepoints) | set([year_start + i for i in lstm_anomaly_indices])
+                    
+                    for rupture_year in sorted(rupture_candidates):
+                        year_idx = rupture_year - year_start
+                        
+                        if year_idx < 0 or year_idx >= len(series):
+                            continue
+                        
+                        bocpd_prob = bocpd_probs[year_idx] if year_idx < len(bocpd_probs) else 0.0
+                        lstm_error = lstm_errors_series[year_idx] if year_idx < len(lstm_errors_series) else 0.0
+                        signal_count = signal_counts[year_idx] if year_idx < len(signal_counts) else 0
+                        
+                        rupture_score = compute_rupture_score(bocpd_prob, lstm_error, signal_count, error_threshold, weights)
+                        drivers = identify_drivers(series, feature_names, year_idx)
+                        
+                        if rupture_score >= args.high_confidence_threshold:
+                            confidence = 'HIGH'
+                        elif rupture_score >= args.medium_confidence_threshold:
+                            confidence = 'MEDIUM'
+                        else:
+                            confidence = 'LOW'
+                        
+                        readiness = series_df.iloc[year_idx]['readiness_class'] if year_idx < len(series_df) else 'UNKNOWN'
+                        
+                        all_ruptures.append({
+                            'country': country,
+                            'industry': industry,
+                            'year': int(rupture_year),
+                            'rupture_score': float(rupture_score),
+                            'confidence': confidence,
+                            'readiness_class': readiness,
+                            'detection_method': {
+                                'bocpd': rupture_year in bocpd_changepoints,
+                                'lstm': year_idx in lstm_anomaly_indices,
+                                'signals': int(signal_count) > 0
+                            },
+                            'scores': {
+                                'bocpd_prob': float(bocpd_prob),
+                                'lstm_error': float(lstm_error),
+                                'signal_count': int(signal_count)
+                            },
+                            'drivers': drivers
+                        })
+
+                print(f"\\nDetected {len(all_ruptures)} ruptures")
+
+                print(f"\\n{'='*80}")
+                print("RANKING OPPORTUNITIES")
+                print(f"{'='*80}")
+
+                opportunities = [
+                    r for r in all_ruptures
+                    if r['confidence'] in ['HIGH', 'MEDIUM'] and
+                       r['readiness_class'] in ['HIGH', 'MEDIUM']
+                ]
+
+                opportunities.sort(key=lambda x: x['rupture_score'], reverse=True)
+
+                print(f"\\nIdentified {len(opportunities)} high-quality opportunities")
+
+                print(f"\\n{'='*80}")
+                print("TOP 20 OPPORTUNITIES")
+                print(f"{'='*80}")
+
+                for i, opp in enumerate(opportunities[:20], 1):
+                    print(f"\\n{i}. {opp['country']} - {opp['industry']} ({opp['year']})")
+                    print(f"   Score: {opp['rupture_score']:.3f} ({opp['confidence']})")
+                    print(f"   Readiness: {opp['readiness_class']}")
+                    methods = [k for k, v in opp['detection_method'].items() if v]
+                    print(f"   Detected by: {methods}")
+
+                print(f"\\n{'='*80}")
+                print("SAVING RESULTS")
+                print(f"{'='*80}")
+
+                output_dir = args.rupture_results
+                os.makedirs(output_dir, exist_ok=True)
+
+                results_package = {
+                    'all_ruptures': all_ruptures,
+                    'opportunities': opportunities,
+                    'config': {
+                        'weights': weights,
+                        'high_confidence_threshold': args.high_confidence_threshold,
+                        'medium_confidence_threshold': args.medium_confidence_threshold
+                    },
+                    'metadata': {
+                        'total_ruptures': len(all_ruptures),
+                        'high_confidence': len([r for r in all_ruptures if r['confidence'] == 'HIGH']),
+                        'medium_confidence': len([r for r in all_ruptures if r['confidence'] == 'MEDIUM']),
+                        'low_confidence': len([r for r in all_ruptures if r['confidence'] == 'LOW']),
+                        'total_opportunities': len(opportunities),
+                        'detection_date': datetime.now().isoformat()
+                    }
+                }
+
+                results_path = os.path.join(output_dir, 'rupturenet_final_results.pkl')
+                with open(results_path, 'wb') as f:
+                    pickle.dump(results_package, f)
+                print(f"\\nSaved: {results_path}")
+
+                ruptures_df = pd.DataFrame(all_ruptures)
+                ruptures_csv_path = os.path.join(output_dir, 'rupturenet_all_ruptures.csv')
+                ruptures_df.to_csv(ruptures_csv_path, index=False)
+                print(f"Saved: {ruptures_csv_path}")
+
+                opportunities_df = pd.DataFrame(opportunities)
+                opportunities_csv_path = os.path.join(output_dir, 'rupturenet_opportunities_ranked.csv')
+                opportunities_df.to_csv(opportunities_csv_path, index=False)
+                print(f"Saved: {opportunities_csv_path}")
+
+                summary = {
+                    'detection_summary': results_package['metadata'],
+                    'top_20_opportunities': [
+                        {
+                            'rank': i+1,
+                            'country': opp['country'],
+                            'industry': opp['industry'],
+                            'year': opp['year'],
+                            'rupture_score': opp['rupture_score'],
+                            'confidence': opp['confidence'],
+                            'readiness': opp['readiness_class']
+                        }
+                        for i, opp in enumerate(opportunities[:20])
+                    ]
+                }
+
+                summary_path = os.path.join(output_dir, 'rupturenet_summary.json')
+                with open(summary_path, 'w') as f:
+                    json.dump(summary, f, indent=2)
+                print(f"Saved: {summary_path}")
+
+                print(f"\\n{'='*80}")
+                print("RUPTURE DETECTION COMPLETE")
+                print(f"{'='*80}")
+
+                print(f"\\nSummary:")
+                print(f"  Total ruptures: {len(all_ruptures)}")
+                print(f"  Opportunities: {len(opportunities)}")
+                print(f"  Output directory: {output_dir}")
+
+                print(f"\\n{'='*80}")
+                print(f"Completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                print(f"{'='*80}")
+                
+            except Exception as e:
+                print(f"\\nError occurred: {e}")
+                import traceback
+                traceback.print_exc()
+                raise
+    args:
+      - --processed_data
+      - {inputPath: processed_data}
+      - --bocpd_results
+      - {inputPath: bocpd_results}
+      - --lstm_results
+      - {inputPath: lstm_results}
+      - --original_csv
+      - {inputValue: original_csv}
+      - --bocpd_weight
+      - {inputValue: bocpd_weight}
+      - --lstm_weight
+      - {inputValue: lstm_weight}
+      - --signal_weight
+      - {inputValue: signal_weight}
+      - --high_confidence_threshold
+      - {inputValue: high_confidence_threshold}
+      - --medium_confidence_threshold
+      - {inputValue: medium_confidence_threshold}
+      - --rupture_results
+      - {outputPath: rupture_results}
