@@ -10,7 +10,7 @@ outputs:
   - {name: processed_data, type: Dataset, description: "Directory containing processed data artifacts"}
 implementation:
   container:
-    image: python:3.11
+    image: python:3.9
     command:
       - sh
       - -c
@@ -359,3 +359,4 @@ implementation:
       - {inputValue: outlier_clip_threshold}
       - --processed_data
       - {outputPath: processed_data}
+
