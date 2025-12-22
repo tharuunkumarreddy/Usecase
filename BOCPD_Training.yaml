@@ -8,7 +8,7 @@ outputs:
   - {name: bocpd_results, type: Dataset, description: "Directory containing BOCPD results (pkl and json files)"}
 implementation:
   container:
-    image: python:3.11
+    image: python:3.9
     command:
       - sh
       - -c
@@ -275,3 +275,4 @@ implementation:
       - {inputValue: threshold}
       - --bocpd_results
       - {outputPath: bocpd_results}
+
