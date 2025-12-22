@@ -19,8 +19,10 @@ implementation:
       - sh
       - -c
       - |
-        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet numpy pandas torch torchvision tqdm matplotlib scikit-learn --index-url https://download.pytorch.org/whl/cpu || \
-        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet numpy pandas torch torchvision tqdm matplotlib scikit-learn --index-url https://download.pytorch.org/whl/cpu --user
+        # Upgrade pip first
+        python3 -m pip install --upgrade pip setuptools wheel
+        # Install packages
+        python3 -m pip install numpy pandas torch torchvision tqdm matplotlib scikit-learn --index-url https://download.pytorch.org/whl/cpu
         exec "$0" "$@"
       - python3
       - -u
