@@ -55,7 +55,7 @@ implementation:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         class LSTMAutoencoder(nn.Module):
-            """LSTM Autoencoder for time series anomaly detection"""
+            #LSTM Autoencoder for time series anomaly detection#
             
             def __init__(self, input_dim, hidden_dim, latent_dim, num_layers, dropout):
                 super(LSTMAutoencoder, self).__init__()
