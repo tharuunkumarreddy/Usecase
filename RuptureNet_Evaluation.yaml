@@ -1,26 +1,18 @@
-name: Rupture_Detection_Scoring
-description: Combines BOCPD and LSTM results to detect and score market ruptures. Identifies high-quality opportunities based on adjusted confidence thresholds. Downloads original CSV for signal columns and readiness classification. ADJUSTED thresholds lowered to 0.55 HIGH and 0.35 MEDIUM to match actual score distribution.
+name: RuptureNet_Evaluation
+description: Evaluates RuptureNet-CPD pipeline performance using precision-recall curves, NDCG ranking metrics, confidence calibration, and temporal distribution analysis. Validates against known market events. Handles NaN values and generates comprehensive evaluation reports with visualizations.
 inputs:
-  - {name: processed_data, type: Dataset, description: "Directory containing rupturenet_processed_data.pkl from preprocessing"}
-  - {name: bocpd_results, type: Dataset, description: "Directory containing BOCPD results from BOCPD training"}
-  - {name: lstm_results, type: Dataset, description: "Directory containing LSTM results from LSTM training"}
-  - {name: csv_url, type: String, description: "CDN URL or file path to original CSV (same as used in preprocessing) for signal columns and readiness class"}
-  - {name: bocpd_weight, type: Float, default: "0.5", description: "Weight for BOCPD in rupture scoring"}
-  - {name: lstm_weight, type: Float, default: "0.3", description: "Weight for LSTM in rupture scoring"}
-  - {name: signal_weight, type: Float, default: "0.2", description: "Weight for signal indicators in rupture scoring"}
-  - {name: high_confidence_threshold, type: Float, default: "0.55", description: "Threshold for HIGH confidence classification (ADJUSTED from 0.75)"}
-  - {name: medium_confidence_threshold, type: Float, default: "0.35", description: "Threshold for MEDIUM confidence classification (ADJUSTED from 0.50)"}
+  - {name: rupture_results, type: Dataset, description: "Directory containing rupturenet_final_results.pkl from Rupture Detection component"}
 outputs:
-  - {name: rupture_results, type: Dataset, description: "Directory containing rupture detection results and opportunities"}
+  - {name: evaluation_results, type: Dataset, description: "Directory containing evaluation metrics, reports, and visualizations"}
 implementation:
   container:
-    image: python:3.9
+    image: python:3.11
     command:
       - sh
       - -c
       - |
-        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet numpy pandas scikit-learn requests || \
-        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet numpy pandas scikit-learn requests --user
+        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet numpy pandas scikit-learn matplotlib || \
+        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet numpy pandas scikit-learn matplotlib --user
         exec "$0" "$@"
       - python3
       - -u
@@ -31,332 +23,436 @@ implementation:
         import pickle
         import json
         from datetime import datetime
+        from sklearn.metrics import precision_recall_curve, auc, average_precision_score
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        from collections import defaultdict
         import argparse
         import os
-        import requests
-        from io import BytesIO
 
-        def load_csv(csv_input):
-            if csv_input.startswith('http://') or csv_input.startswith('https://'):
-                print(f"Fetching CSV from URL: {csv_input}")
-                resp = requests.get(csv_input)
-                resp.raise_for_status()
-                df = pd.read_csv(BytesIO(resp.content))
-                print("Loaded CSV from URL")
-            elif csv_input.startswith('gs://'):
-                print(f"Fetching CSV from GCS: {csv_input}")
-                resp = requests.get(csv_input)
-                resp.raise_for_status()
-                df = pd.read_csv(BytesIO(resp.content))
-                print("Loaded CSV from GCS")
-            else:
-                print(f"Loading CSV from file: {csv_input}")
-                df = pd.read_csv(csv_input)
-                print("Loaded CSV from file system")
-            return df
+        KNOWN_EVENTS = {
+            2008: {'severity': 5, 'type': 'crisis', 'global': True},
+            2009: {'severity': 4, 'type': 'crisis', 'global': True},
+            2018: {'severity': 3, 'type': 'trade_shock', 'countries': ['USA', 'CHN']},
+            2019: {'severity': 3, 'type': 'trade_shock', 'countries': ['USA', 'CHN']},
+            2016: {'severity': 3, 'type': 'policy', 'countries': ['GBR']},
+            2020: {'severity': 5, 'type': 'crisis', 'global': True},
+            2021: {'severity': 3, 'type': 'recovery', 'global': True},
+        }
 
-        def compute_rupture_score(bocpd_prob, lstm_error, signal_count, error_threshold, weights):
-            bocpd_norm = min(bocpd_prob, 1.0)
-            lstm_norm = min(lstm_error / error_threshold, 1.0)
-            signal_norm = min(signal_count / 5.0, 1.0)
-            
-            score = (
-                weights['bocpd'] * bocpd_norm +
-                weights['lstm'] * lstm_norm +
-                weights['signal'] * signal_norm
-            )
-            
-            return score
+        def matches_known_event(rupture_year, rupture_country):
+            for event_year, event_info in KNOWN_EVENTS.items():
+                if abs(rupture_year - event_year) <= 1:
+                    if event_info.get('global', False):
+                        return True
+                    elif 'countries' in event_info:
+                        if rupture_country in event_info['countries']:
+                            return True
+            return False
 
-        def identify_drivers(series_data, feature_names, year_idx, window=3, top_k=5):
-            T, F = series_data.shape
+        def compute_ndcg_at_k(opportunities, k=20):
+            if len(opportunities) < k:
+                k = len(opportunities)
             
-            before_start = max(0, year_idx - window)
-            before_end = year_idx
-            after_start = year_idx
-            after_end = min(T, year_idx + window)
+            relevance_scores = []
             
-            if before_end <= before_start or after_end <= after_start:
-                return []
+            for opp in opportunities[:k]:
+                year = opp['year']
+                country = opp['country']
+                
+                max_relevance = 0
+                for event_year, event_info in KNOWN_EVENTS.items():
+                    if abs(year - event_year) <= 1:
+                        if event_info.get('global', False):
+                            max_relevance = max(max_relevance, event_info['severity'])
+                        elif 'countries' in event_info and country in event_info['countries']:
+                            max_relevance = max(max_relevance, event_info['severity'])
+                
+                relevance_scores.append(max_relevance)
             
-            before_mean = np.mean(series_data[before_start:before_end], axis=0)
-            after_mean = np.mean(series_data[after_start:after_end], axis=0)
-            series_std = np.std(series_data, axis=0) + 1e-6
-            delta_zscore = (after_mean - before_mean) / series_std
+            relevance = np.array(relevance_scores)
             
-            drivers = []
-            for f_idx, (feat, delta) in enumerate(zip(feature_names, delta_zscore)):
-                if np.abs(delta) > 1.0:
-                    drivers.append({
-                        'feature': feat,
-                        'delta_zscore': float(delta),
-                        'direction': 'increase' if delta > 0 else 'decrease'
-                    })
+            if len(relevance) == 0:
+                return 0.0
             
-            drivers.sort(key=lambda x: abs(x['delta_zscore']), reverse=True)
-            return drivers[:top_k]
+            dcg = relevance[0]
+            if len(relevance) > 1:
+                dcg += np.sum(relevance[1:] / np.log2(np.arange(2, len(relevance) + 1)))
+            
+            ideal_relevance = np.sort(relevance)[::-1]
+            idcg = ideal_relevance[0]
+            if len(ideal_relevance) > 1:
+                idcg += np.sum(ideal_relevance[1:] / np.log2(np.arange(2, len(ideal_relevance) + 1)))
+            
+            ndcg = dcg / idcg if idcg > 0 else 0.0
+            return ndcg
 
         if __name__ == "__main__":
             parser = argparse.ArgumentParser()
-            parser.add_argument('--processed_data', type=str, required=True)
-            parser.add_argument('--bocpd_results', type=str, required=True)
-            parser.add_argument('--lstm_results', type=str, required=True)
-            parser.add_argument('--csv_url', type=str, required=True)
-            parser.add_argument('--bocpd_weight', type=float, default=0.5)
-            parser.add_argument('--lstm_weight', type=float, default=0.3)
-            parser.add_argument('--signal_weight', type=float, default=0.2)
-            parser.add_argument('--high_confidence_threshold', type=float, default=0.55)
-            parser.add_argument('--medium_confidence_threshold', type=float, default=0.35)
             parser.add_argument('--rupture_results', type=str, required=True)
+            parser.add_argument('--evaluation_results', type=str, required=True)
             args = parser.parse_args()
 
             try:
-                print("="*80)
-                print("RUPTURENET-CPD: RUPTURE DETECTION & SCORING")
-                print("="*80)
-                print(f"\\nStarted: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                sep = "=" * 80
+                print(sep)
+                print("RUPTURENET-CPD: EVALUATION")
+                print(sep)
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                print("\\nStarted:", timestamp)
 
-                weights = {
-                    'bocpd': args.bocpd_weight,
-                    'lstm': args.lstm_weight,
-                    'signal': args.signal_weight
-                }
+                print("\\nLoaded", len(KNOWN_EVENTS), "known events for validation")
 
-                print(f"\\nConfiguration:")
-                print(f"  Weights: BOCPD={weights['bocpd']}, LSTM={weights['lstm']}, Signal={weights['signal']}")
-                print(f"  HIGH confidence: >={args.high_confidence_threshold}")
-                print(f"  MEDIUM confidence: >={args.medium_confidence_threshold}")
+                print("\\n" + sep)
+                print("LOADING DETECTION RESULTS")
+                print(sep)
 
-                print(f"\\n{'='*80}")
-                print("LOADING DATA")
-                print(f"{'='*80}")
+                results_path = os.path.join(args.rupture_results, 'rupturenet_final_results.pkl')
+                with open(results_path, 'rb') as f:
+                    results = pickle.load(f)
 
-                print(f"\\n1. Loading preprocessed data...")
-                with open(os.path.join(args.processed_data, 'rupturenet_processed_data.pkl'), 'rb') as f:
-                    data_package = pickle.load(f)
-                
-                train_info = data_package['train_info']
-                test_info = data_package['test_info']
-                feature_names = data_package['feature_names']
-                test_series = data_package['test_series']
+                all_ruptures = results['all_ruptures']
+                opportunities = results['opportunities']
 
-                print(f"   Loaded: {len(test_series)} test series")
+                print("\\nTotal ruptures detected:", len(all_ruptures))
+                print("High-quality opportunities:", len(opportunities))
 
-                print(f"\\n2. Loading BOCPD results...")
-                with open(os.path.join(args.bocpd_results, 'bocpd_results.pkl'), 'rb') as f:
-                    bocpd_results = pickle.load(f)
-                
-                bocpd_test = bocpd_results['test_results']
-                print(f"   Test changepoints: {sum(r['n_changepoints'] for r in bocpd_test)}")
+                print("\\n" + sep)
+                print("CLEANING DATA")
+                print(sep)
 
-                print(f"\\n3. Loading LSTM results...")
-                with open(os.path.join(args.lstm_results, 'lstm_autoencoder_results.pkl'), 'rb') as f:
-                    lstm_results = pickle.load(f)
-                
-                test_errors = lstm_results['test_errors']
-                test_anomalies = lstm_results['test_anomalies']
-                error_threshold = lstm_results['error_threshold']
-                print(f"   Error threshold: {error_threshold:.6f}")
+                nan_count = sum(1 for r in all_ruptures if pd.isna(r.get('rupture_score', np.nan)))
+                print("\\nRuptures with NaN scores:", nan_count)
 
-                print(f"\\n4. Loading original CSV for signals and readiness...")
-                print(f"   CSV URL: {args.csv_url}")
-                df_original = load_csv(args.csv_url)
-                print(f"   Loaded CSV shape: {df_original.shape}")
+                if nan_count > 0:
+                    print("Fixing", nan_count, "ruptures with NaN scores...")
+                    for rupture in all_ruptures:
+                        if pd.isna(rupture.get('rupture_score', np.nan)):
+                            rupture['rupture_score'] = 0.0
+                        if 'scores' in rupture:
+                            for key in rupture['scores']:
+                                if pd.isna(rupture['scores'][key]):
+                                    rupture['scores'][key] = 0.0
+                    print("Fixed all NaN values")
 
-                print(f"\\n{'='*80}")
-                print("DETECTING RUPTURES")
-                print(f"{'='*80}")
+                valid_ruptures = [r for r in all_ruptures if not pd.isna(r.get('rupture_score', np.nan))]
+                print("\\nValid ruptures:", len(valid_ruptures))
 
-                all_ruptures = []
+                confidence_counts = defaultdict(int)
+                for r in valid_ruptures:
+                    confidence_counts[r['confidence']] += 1
 
-                for idx, (bocpd_res, series, info) in enumerate(zip(bocpd_test, test_series, test_info)):
-                    country = info['country']
-                    industry = info['industry']
-                    year_start = info['year_start']
-                    
-                    bocpd_changepoints = bocpd_res['changepoint_years']
-                    bocpd_probs = bocpd_res['changepoint_probs']
-                    lstm_anomaly_indices = np.where(test_anomalies[idx] == 1)[0]
-                    lstm_errors_series = test_errors[idx]
-                    
-                    series_df = df_original[
-                        (df_original['country'] == country) & 
-                        (df_original['industry'] == industry) &
-                        (df_original['year'] >= year_start) &
-                        (df_original['year'] < year_start + len(series))
-                    ].sort_values('year')
-                    
-                    signal_cols = [c for c in series_df.columns if c.endswith('_signal')]
-                    signal_counts = series_df[signal_cols].sum(axis=1).values if signal_cols else np.zeros(len(series))
-                    
-                    rupture_candidates = set(bocpd_changepoints) | set([year_start + i for i in lstm_anomaly_indices])
-                    
-                    for rupture_year in sorted(rupture_candidates):
-                        year_idx = rupture_year - year_start
-                        
-                        if year_idx < 0 or year_idx >= len(series):
-                            continue
-                        
-                        bocpd_prob = bocpd_probs[year_idx] if year_idx < len(bocpd_probs) else 0.0
-                        lstm_error = lstm_errors_series[year_idx] if year_idx < len(lstm_errors_series) else 0.0
-                        signal_count = signal_counts[year_idx] if year_idx < len(signal_counts) else 0
-                        
-                        rupture_score = compute_rupture_score(bocpd_prob, lstm_error, signal_count, error_threshold, weights)
-                        drivers = identify_drivers(series, feature_names, year_idx)
-                        
-                        if rupture_score >= args.high_confidence_threshold:
-                            confidence = 'HIGH'
-                        elif rupture_score >= args.medium_confidence_threshold:
-                            confidence = 'MEDIUM'
-                        else:
-                            confidence = 'LOW'
-                        
-                        readiness = series_df.iloc[year_idx]['readiness_class'] if year_idx < len(series_df) else 'UNKNOWN'
-                        
-                        all_ruptures.append({
-                            'country': country,
-                            'industry': industry,
-                            'year': int(rupture_year),
-                            'rupture_score': float(rupture_score),
-                            'confidence': confidence,
-                            'readiness_class': readiness,
-                            'detection_method': {
-                                'bocpd': rupture_year in bocpd_changepoints,
-                                'lstm': year_idx in lstm_anomaly_indices,
-                                'signals': int(signal_count) > 0
-                            },
-                            'scores': {
-                                'bocpd_prob': float(bocpd_prob),
-                                'lstm_error': float(lstm_error),
-                                'signal_count': int(signal_count)
-                            },
-                            'drivers': drivers
-                        })
+                print("\\nRupture breakdown:")
+                print("  HIGH:  ", confidence_counts['HIGH'])
+                print("  MEDIUM:", confidence_counts['MEDIUM'])
+                print("  LOW:   ", confidence_counts['LOW'])
 
-                print(f"\\nDetected {len(all_ruptures)} ruptures")
+                print("\\n" + sep)
+                print("METRIC 1: PRECISION-RECALL AUC")
+                print(sep)
 
-                print(f"\\n{'='*80}")
-                print("RANKING OPPORTUNITIES")
-                print(f"{'='*80}")
+                y_true = []
+                y_scores = []
 
-                opportunities = [
-                    r for r in all_ruptures
-                    if r['confidence'] in ['HIGH', 'MEDIUM'] and
-                       r['readiness_class'] in ['HIGH', 'MEDIUM']
-                ]
+                for rupture in valid_ruptures:
+                    score = rupture['rupture_score']
+                    if pd.isna(score) or not np.isfinite(score):
+                        continue
+                    is_match = matches_known_event(rupture['year'], rupture['country'])
+                    y_true.append(1 if is_match else 0)
+                    y_scores.append(float(score))
 
-                opportunities.sort(key=lambda x: x['rupture_score'], reverse=True)
+                print("\\nLabels created:", len(y_true))
+                print("  True positives:", sum(y_true))
+                print("  False positives:", len(y_true) - sum(y_true))
 
-                print(f"\\nIdentified {len(opportunities)} high-quality opportunities")
-
-                print(f"\\n{'='*80}")
-                print("TOP 20 OPPORTUNITIES")
-                print(f"{'='*80}")
-
-                for i, opp in enumerate(opportunities[:20], 1):
-                    print(f"\\n{i}. {opp['country']} - {opp['industry']} ({opp['year']})")
-                    print(f"   Score: {opp['rupture_score']:.3f} ({opp['confidence']})")
-                    print(f"   Readiness: {opp['readiness_class']}")
-                    methods = [k for k, v in opp['detection_method'].items() if v]
-                    print(f"   Detected by: {methods}")
-
-                print(f"\\n{'='*80}")
-                print("SAVING RESULTS")
-                print(f"{'='*80}")
-
-                output_dir = args.rupture_results
+                output_dir = args.evaluation_results
                 os.makedirs(output_dir, exist_ok=True)
 
-                results_package = {
-                    'all_ruptures': all_ruptures,
-                    'opportunities': opportunities,
-                    'config': {
-                        'weights': weights,
-                        'high_confidence_threshold': args.high_confidence_threshold,
-                        'medium_confidence_threshold': args.medium_confidence_threshold
+                if len(set(y_true)) >= 2 and len(y_true) > 0:
+                    y_scores_array = np.array(y_scores)
+                    if np.any(~np.isfinite(y_scores_array)):
+                        print("\\nFound non-finite values, removing...")
+                        valid_idx = np.isfinite(y_scores_array)
+                        y_true = [y_true[i] for i in range(len(y_true)) if valid_idx[i]]
+                        y_scores = [y_scores[i] for i in range(len(y_scores)) if valid_idx[i]]
+                        print("  Valid samples:", len(y_true))
+                    
+                    try:
+                        precision, recall, thresholds = precision_recall_curve(y_true, y_scores)
+                        pr_auc = auc(recall, precision)
+                        avg_precision = average_precision_score(y_true, y_scores)
+                        
+                        print("\\nPR-AUC:", round(pr_auc, 4))
+                        print("Average Precision:", round(avg_precision, 4))
+                        
+                        detected_events = set()
+                        for rupture in valid_ruptures:
+                            for event_year in KNOWN_EVENTS.keys():
+                                if abs(rupture['year'] - event_year) <= 1:
+                                    detected_events.add(event_year)
+                        
+                        coverage = len(detected_events) / len(set(KNOWN_EVENTS.keys()))
+                        print("Event Coverage:", str(round(coverage * 100, 1)) + "%", 
+                              "(" + str(len(detected_events)) + "/" + str(len(set(KNOWN_EVENTS.keys()))) + " events)")
+                        
+                        print("\\nDetected known events:")
+                        for event_year in sorted(detected_events):
+                            event_info = KNOWN_EVENTS[event_year]
+                            print("  " + str(event_year) + ":", event_info['type'], 
+                                  "(severity " + str(event_info['severity']) + ")")
+                        
+                        plt.figure(figsize=(10, 6))
+                        plt.plot(recall, precision, marker='.', linewidth=2, 
+                                label='PR-AUC = ' + str(round(pr_auc, 4)))
+                        plt.xlabel('Recall', fontsize=12)
+                        plt.ylabel('Precision', fontsize=12)
+                        plt.title('Precision-Recall Curve for Rupture Detection', fontsize=14)
+                        plt.legend(fontsize=12)
+                        plt.grid(True, alpha=0.3)
+                        plt.tight_layout()
+                        pr_curve_path = os.path.join(output_dir, 'evaluation_pr_curve.png')
+                        plt.savefig(pr_curve_path, dpi=150, bbox_inches='tight')
+                        print("\\nSaved:", pr_curve_path)
+                        plt.close()
+                        
+                    except Exception as e:
+                        print("\\nError computing PR-AUC:", str(e))
+                        pr_auc = 0.0
+                        avg_precision = 0.0
+                        coverage = 0.0
+                        detected_events = set()
+                else:
+                    print("\\nNot enough class diversity for PR-AUC calculation")
+                    pr_auc = 0.0
+                    avg_precision = 0.0
+                    coverage = 0.0
+                    detected_events = set()
+
+                print("\\n" + sep)
+                print("METRIC 2: NDCG@K (RANKING QUALITY)")
+                print(sep)
+
+                ndcg_5 = compute_ndcg_at_k(opportunities, k=5)
+                ndcg_10 = compute_ndcg_at_k(opportunities, k=10)
+                ndcg_20 = compute_ndcg_at_k(opportunities, k=20)
+
+                print("\\nNDCG@5: ", round(ndcg_5, 4))
+                print("NDCG@10:", round(ndcg_10, 4))
+                print("NDCG@20:", round(ndcg_20, 4))
+
+                print("\\nInterpretation:")
+                if ndcg_20 > 0.7:
+                    print("  Excellent ranking quality!")
+                elif ndcg_20 > 0.5:
+                    print("  Good ranking quality")
+                elif ndcg_20 > 0.3:
+                    print("  Moderate ranking quality")
+                else:
+                    print("  Poor ranking (needs improvement)")
+
+                print("\\n" + sep)
+                print("METRIC 3: CONFIDENCE CALIBRATION")
+                print(sep)
+
+                calibration = defaultdict(lambda: {'total': 0, 'true_positives': 0})
+
+                for rupture in valid_ruptures:
+                    confidence = rupture['confidence']
+                    year = rupture['year']
+                    country = rupture['country']
+                    is_tp = matches_known_event(year, country)
+                    calibration[confidence]['total'] += 1
+                    if is_tp:
+                        calibration[confidence]['true_positives'] += 1
+
+                print("\\nConfidence to Precision mapping:")
+                for conf in ['HIGH', 'MEDIUM', 'LOW']:
+                    if conf in calibration and calibration[conf]['total'] > 0:
+                        total = calibration[conf]['total']
+                        tp = calibration[conf]['true_positives']
+                        precision = tp / total if total > 0 else 0
+                        print("  " + conf + ":", str(round(precision * 100, 1)) + "% precision",
+                              "(" + str(tp) + "/" + str(total) + ")")
+
+                print("\\n" + sep)
+                print("METRIC 4: TEMPORAL DISTRIBUTION")
+                print(sep)
+
+                rupture_years = [r['year'] for r in valid_ruptures]
+                year_counts = pd.Series(rupture_years).value_counts().sort_index()
+                top_5_years = year_counts.nlargest(5)
+
+                print("\\nTop 5 years with most ruptures:")
+                for year, count in top_5_years.items():
+                    known_event = KNOWN_EVENTS.get(year, {})
+                    event_str = " (" + known_event['type'] + ")" if known_event else ""
+                    print("  " + str(year) + ":", count, "ruptures" + event_str)
+
+                known_event_years = list(set(KNOWN_EVENTS.keys()))
+                overlap = len(set(top_5_years.index) & set(known_event_years))
+                print("\\nOverlap with known events:", str(overlap) + "/" + str(len(known_event_years)))
+
+                plt.figure(figsize=(14, 6))
+                plt.bar(year_counts.index, year_counts.values, alpha=0.7, color='steelblue')
+                for event_year in set(KNOWN_EVENTS.keys()):
+                    plt.axvline(event_year, color='red', linestyle='--', alpha=0.6, linewidth=2)
+                plt.xlabel('Year', fontsize=12)
+                plt.ylabel('Number of Ruptures Detected', fontsize=12)
+                plt.title('Temporal Distribution of Detected Ruptures', fontsize=14)
+                plt.legend(['Known Events', 'Detected Ruptures'], fontsize=10)
+                plt.grid(True, alpha=0.3, axis='y')
+                plt.tight_layout()
+                temporal_path = os.path.join(output_dir, 'evaluation_temporal_distribution.png')
+                plt.savefig(temporal_path, dpi=150, bbox_inches='tight')
+                print("\\nSaved:", temporal_path)
+                plt.close()
+
+                print("\\n" + sep)
+                print("SAVING EVALUATION RESULTS")
+                print(sep)
+
+                evaluation_results_data = {
+                    'metrics': {
+                        'pr_auc': float(pr_auc),
+                        'average_precision': float(avg_precision),
+                        'event_coverage': float(coverage),
+                        'ndcg_5': float(ndcg_5),
+                        'ndcg_10': float(ndcg_10),
+                        'ndcg_20': float(ndcg_20),
                     },
-                    'metadata': {
-                        'total_ruptures': len(all_ruptures),
-                        'high_confidence': len([r for r in all_ruptures if r['confidence'] == 'HIGH']),
-                        'medium_confidence': len([r for r in all_ruptures if r['confidence'] == 'MEDIUM']),
-                        'low_confidence': len([r for r in all_ruptures if r['confidence'] == 'LOW']),
-                        'total_opportunities': len(opportunities),
-                        'detection_date': datetime.now().isoformat()
-                    }
-                }
-
-                results_path = os.path.join(output_dir, 'rupturenet_final_results.pkl')
-                with open(results_path, 'wb') as f:
-                    pickle.dump(results_package, f)
-                print(f"\\nSaved: {results_path}")
-
-                ruptures_df = pd.DataFrame(all_ruptures)
-                ruptures_csv_path = os.path.join(output_dir, 'rupturenet_all_ruptures.csv')
-                ruptures_df.to_csv(ruptures_csv_path, index=False)
-                print(f"Saved: {ruptures_csv_path}")
-
-                opportunities_df = pd.DataFrame(opportunities)
-                opportunities_csv_path = os.path.join(output_dir, 'rupturenet_opportunities_ranked.csv')
-                opportunities_df.to_csv(opportunities_csv_path, index=False)
-                print(f"Saved: {opportunities_csv_path}")
-
-                summary = {
-                    'detection_summary': results_package['metadata'],
-                    'top_20_opportunities': [
-                        {
-                            'rank': i+1,
-                            'country': opp['country'],
-                            'industry': opp['industry'],
-                            'year': opp['year'],
-                            'rupture_score': opp['rupture_score'],
-                            'confidence': opp['confidence'],
-                            'readiness': opp['readiness_class']
+                    'confidence_calibration': {
+                        conf: {
+                            'precision': float(calibration[conf]['true_positives'] / calibration[conf]['total']) if calibration[conf]['total'] > 0 else 0.0,
+                            'total_ruptures': int(calibration[conf]['total']),
+                            'true_positives': int(calibration[conf]['true_positives'])
                         }
-                        for i, opp in enumerate(opportunities[:20])
-                    ]
+                        for conf in ['HIGH', 'MEDIUM', 'LOW'] if conf in calibration
+                    },
+                    'temporal_analysis': {
+                        'top_5_years': {int(k): int(v) for k, v in top_5_years.items()},
+                        'overlap_with_known_events': int(overlap),
+                        'total_known_events': len(known_event_years)
+                    },
+                    'data_summary': {
+                        'total_ruptures': len(valid_ruptures),
+                        'opportunities': len(opportunities),
+                        'high_confidence': confidence_counts['HIGH'],
+                        'medium_confidence': confidence_counts['MEDIUM'],
+                        'low_confidence': confidence_counts['LOW'],
+                        'nan_ruptures_fixed': nan_count
+                    },
+                    'evaluation_date': datetime.now().isoformat()
                 }
 
-                summary_path = os.path.join(output_dir, 'rupturenet_summary.json')
-                with open(summary_path, 'w') as f:
-                    json.dump(summary, f, indent=2)
-                print(f"Saved: {summary_path}")
+                eval_json_path = os.path.join(output_dir, 'evaluation_results.json')
+                with open(eval_json_path, 'w') as f:
+                    json.dump(evaluation_results_data, f, indent=2)
+                print("\\nSaved:", eval_json_path)
 
-                print(f"\\n{'='*80}")
-                print("RUPTURE DETECTION COMPLETE")
-                print(f"{'='*80}")
+                report_lines = []
+                report_lines.append("RUPTURENET-CPD EVALUATION REPORT")
+                report_lines.append("Generated: " + datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+                report_lines.append(sep)
+                report_lines.append("")
+                report_lines.append("DATA CLEANING")
+                report_lines.append("  NaN values fixed: " + str(nan_count))
+                report_lines.append("  Valid ruptures: " + str(len(valid_ruptures)))
+                report_lines.append("")
+                report_lines.append("DETECTION SUMMARY")
+                report_lines.append("  High-Quality Opportunities: " + str(len(opportunities)))
+                report_lines.append("")
+                report_lines.append("  By Confidence:")
+                report_lines.append("    HIGH:   " + str(confidence_counts['HIGH']))
+                report_lines.append("    MEDIUM: " + str(confidence_counts['MEDIUM']))
+                report_lines.append("    LOW:    " + str(confidence_counts['LOW']))
+                report_lines.append("")
+                report_lines.append("METRIC 1: PRECISION-RECALL")
+                report_lines.append("  PR-AUC: " + str(round(pr_auc, 4)))
+                report_lines.append("  Average Precision: " + str(round(avg_precision, 4)))
+                report_lines.append("  Event Coverage: " + str(round(coverage * 100, 1)) + "% (" + 
+                                  str(len(detected_events)) + "/" + str(len(known_event_years)) + " events)")
+                report_lines.append("")
+                report_lines.append("METRIC 2: RANKING QUALITY (NDCG)")
+                report_lines.append("  NDCG@5:  " + str(round(ndcg_5, 4)))
+                report_lines.append("  NDCG@10: " + str(round(ndcg_10, 4)))
+                report_lines.append("  NDCG@20: " + str(round(ndcg_20, 4)))
+                report_lines.append("")
+                report_lines.append("METRIC 3: CONFIDENCE CALIBRATION")
+                
+                for conf in ['HIGH', 'MEDIUM', 'LOW']:
+                    if conf in calibration and calibration[conf]['total'] > 0:
+                        precision = calibration[conf]['true_positives'] / calibration[conf]['total']
+                        report_lines.append("  " + conf + ": " + str(round(precision * 100, 1)) + "% precision (" + 
+                                          str(calibration[conf]['true_positives']) + "/" + 
+                                          str(calibration[conf]['total']) + ")")
 
-                print(f"\\nSummary:")
-                print(f"  Total ruptures: {len(all_ruptures)}")
-                print(f"  Opportunities: {len(opportunities)}")
-                print(f"  Output directory: {output_dir}")
+                report_lines.append("")
+                report_lines.append("METRIC 4: TEMPORAL ALIGNMENT")
+                report_lines.append("  Top 5 Years: " + ', '.join(map(str, top_5_years.index.tolist())))
+                report_lines.append("  Overlap: " + str(overlap) + "/" + str(len(known_event_years)))
+                report_lines.append("")
+                report_lines.append(sep)
+                report_lines.append("OVERALL ASSESSMENT")
+                report_lines.append(sep)
+                report_lines.append("")
+                
+                detect_quality = "GOOD" if pr_auc > 0.6 else "NEEDS IMPROVEMENT"
+                report_lines.append("Detection Quality:  " + detect_quality + " (PR-AUC " + str(round(pr_auc, 4)) + ")")
+                
+                rank_quality = "GOOD" if ndcg_20 > 0.5 else "NEEDS IMPROVEMENT"
+                report_lines.append("Ranking Quality:    " + rank_quality + " (NDCG@20 " + str(round(ndcg_20, 4)) + ")")
+                
+                coverage_quality = "GOOD" if coverage > 0.6 else "NEEDS IMPROVEMENT"
+                report_lines.append("Event Coverage:     " + coverage_quality + " (" + str(round(coverage * 100, 1)) + "%)")
+                report_lines.append("")
+                report_lines.append("RECOMMENDATIONS:")
+                
+                if pr_auc < 0.6:
+                    report_lines.append("  - Run hyperparameter tuning to improve PR-AUC")
+                if ndcg_20 < 0.5:
+                    report_lines.append("  - Adjust scoring weights to improve ranking")
+                if coverage < 0.6:
+                    report_lines.append("  - Lower BOCPD threshold to increase recall")
+                if pr_auc >= 0.6 and ndcg_20 >= 0.5 and coverage >= 0.6:
+                    report_lines.append("  - Model performing well! Ready for production.")
+                    report_lines.append("  - Consider hyperparameter tuning for further improvement.")
 
-                print(f"\\n{'='*80}")
-                print(f"Completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-                print(f"{'='*80}")
+                report = "\\n".join(report_lines)
+
+                report_path = os.path.join(output_dir, 'evaluation_report.txt')
+                with open(report_path, 'w', encoding='utf-8') as f:
+                    f.write(report)
+                print("Saved:", report_path)
+
+                print("\\n" + sep)
+                print("EVALUATION COMPLETE")
+                print(sep)
+
+                print("\\nKey Metrics:")
+                print("  PR-AUC:  ", round(pr_auc, 4))
+                print("  NDCG@20: ", round(ndcg_20, 4))
+                print("  Coverage:", str(round(coverage * 100, 1)) + "%")
+
+                print("\\nOutput Files:")
+                print("  1. evaluation_results.json")
+                print("  2. evaluation_report.txt")
+                print("  3. evaluation_pr_curve.png")
+                print("  4. evaluation_temporal_distribution.png")
+
+                print("\\n" + sep)
+                timestamp_end = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                print("Completed:", timestamp_end)
+                print(sep)
                 
             except Exception as e:
-                print(f"\\nError occurred: {e}")
+                print("\\nError occurred:", str(e))
                 import traceback
                 traceback.print_exc()
                 raise
     args:
-      - --processed_data
-      - {inputPath: processed_data}
-      - --bocpd_results
-      - {inputPath: bocpd_results}
-      - --lstm_results
-      - {inputPath: lstm_results}
-      - --csv_url
-      - {inputValue: csv_url}
-      - --bocpd_weight
-      - {inputValue: bocpd_weight}
-      - --lstm_weight
-      - {inputValue: lstm_weight}
-      - --signal_weight
-      - {inputValue: signal_weight}
-      - --high_confidence_threshold
-      - {inputValue: high_confidence_threshold}
-      - --medium_confidence_threshold
-      - {inputValue: medium_confidence_threshold}
       - --rupture_results
-      - {outputPath: rupture_results}
+      - {inputPath: rupture_results}
+      - --evaluation_results
+      - {outputPath: evaluation_results}
