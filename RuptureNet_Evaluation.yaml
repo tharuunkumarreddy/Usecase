@@ -6,7 +6,7 @@ outputs:
   - {name: evaluation_results, type: Dataset, description: "Directory containing evaluation metrics, reports, and visualizations"}
 implementation:
   container:
-    image: python:3.9
+    image: python:3.11
     command:
       - sh
       - -c
