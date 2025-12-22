@@ -1,0 +1,277 @@
+name: BOCPD_Training
+description: Bayesian Online Change Point Detection training component. Detects structural breaks and changepoints in multivariate time series data. FIXED threshold lowered to 0.3 for better detection on short test series.
+inputs:
+  - {name: processed_data, type: Dataset, description: "Directory containing rupturenet_processed_data.pkl from preprocessing component"}
+  - {name: hazard_lambda, type: Float, default: "250.0", description: "Timescale for changepoint prior (higher = fewer changepoints)"}
+  - {name: threshold, type: Float, default: "0.3", description: "Probability threshold for detecting changepoint (FIXED: lowered from 0.5)"}
+outputs:
+  - {name: bocpd_results, type: Dataset, description: "Directory containing BOCPD results (pkl and json files)"}
+implementation:
+  container:
+    image: python:3.9
+    command:
+      - sh
+      - -c
+      - |
+        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet numpy pandas scipy tqdm || \
+        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet numpy pandas scipy tqdm --user
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import numpy as np
+        import pandas as pd
+        from scipy.stats import norm
+        import pickle
+        import json
+        from datetime import datetime
+        from tqdm import tqdm
+        import argparse
+        import os
+
+        class BOCPD:
+            def __init__(self, hazard_lambda=250, threshold=0.3):
+                self.hazard_lambda = hazard_lambda
+                self.threshold = threshold
+                
+            def constant_hazard(self, lam, r):
+                return 1.0 / lam * np.ones(r.shape)
+            
+            def gaussian_update(self, data, mean, var, n):
+                n_new = n + 1
+                mean_new = (n * mean + data) / n_new
+                var_new = ((n - 1) * var + (data - mean) ** 2 * n / n_new) / n_new if n > 0 else var
+                pred_var = var + var_new
+                pred_prob = norm.pdf(data, loc=mean, scale=np.sqrt(pred_var + 1e-10))
+                return mean_new, var_new, pred_prob
+            
+            def detect(self, data):
+                T = len(data)
+                R = np.zeros((T + 1, T + 1))
+                R[0, 0] = 1.0
+                
+                mean = np.zeros(T + 1)
+                var = np.ones(T + 1) * 0.1
+                n = np.zeros(T + 1)
+                changepoint_probs = np.zeros(T)
+                
+                for t in range(T):
+                    x_t = data[t]
+                    pred_probs = np.zeros(t + 1)
+                    
+                    for r in range(t + 1):
+                        _, _, pred_probs[r] = self.gaussian_update(x_t, mean[r], var[r], n[r])
+                    
+                    R[t + 1, 1:t + 2] = R[t, :t + 1] * pred_probs * (1 - self.constant_hazard(self.hazard_lambda, np.arange(t + 1)))
+                    R[t + 1, 0] = np.sum(R[t, :t + 1] * pred_probs * self.constant_hazard(self.hazard_lambda, np.arange(t + 1)))
+                    changepoint_probs[t] = R[t + 1, 0]
+                    R[t + 1, :t + 2] = R[t + 1, :t + 2] / np.sum(R[t + 1, :t + 2])
+                    
+                    for r in range(t + 2):
+                        mean[r], var[r], _ = self.gaussian_update(x_t, mean[r], var[r], n[r])
+                        n[r] += 1
+                
+                changepoints = np.where(changepoint_probs > self.threshold)[0]
+                return changepoints, R, changepoint_probs
+            
+            def detect_multivariate(self, data):
+                T, F = data.shape
+                all_probs = []
+                
+                for f in range(F):
+                    _, _, probs = self.detect(data[:, f])
+                    all_probs.append(probs)
+                
+                all_probs = np.array(all_probs)
+                changepoint_probs = np.exp(np.mean(np.log(all_probs + 1e-10), axis=0))
+                changepoints = np.where(changepoint_probs > self.threshold)[0]
+                
+                return changepoints, changepoint_probs
+
+        if __name__ == "__main__":
+            parser = argparse.ArgumentParser()
+            parser.add_argument('--processed_data', type=str, required=True)
+            parser.add_argument('--hazard_lambda', type=float, default=250.0)
+            parser.add_argument('--threshold', type=float, default=0.3)
+            parser.add_argument('--bocpd_results', type=str, required=True)
+            args = parser.parse_args()
+
+            try:
+                print("="*80)
+                print("RUPTURENET-CPD: BAYESIAN ONLINE CHANGE POINT DETECTION")
+                print("="*80)
+                print(f"\\nStarted: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+                print(f"\\n{'='*80}")
+                print("LOADING PREPROCESSED DATA")
+                print(f"{'='*80}")
+
+                processed_data_path = os.path.join(args.processed_data, 'rupturenet_processed_data.pkl')
+                
+                with open(processed_data_path, 'rb') as f:
+                    data_package = pickle.load(f)
+
+                train_series = data_package['train_series']
+                test_series = data_package['test_series']
+                train_info = data_package['train_info']
+                test_info = data_package['test_info']
+                feature_names = data_package['feature_names']
+
+                print(f"\\nLoaded:")
+                print(f"  Training series: {len(train_series)}")
+                print(f"  Test series: {len(test_series)}")
+                print(f"  Features: {len(feature_names)}")
+
+                print(f"\\n{'='*80}")
+                print("RUNNING BOCPD ON TRAINING DATA")
+                print(f"{'='*80}")
+
+                bocpd = BOCPD(hazard_lambda=args.hazard_lambda, threshold=args.threshold)
+
+                print(f"\\nModel parameters:")
+                print(f"  Hazard lambda: {bocpd.hazard_lambda}")
+                print(f"  Threshold: {bocpd.threshold}")
+
+                train_results = []
+
+                print(f"\\nProcessing {len(train_series)} training series...")
+
+                for idx, (series, info) in enumerate(tqdm(zip(train_series, train_info), total=len(train_series))):
+                    try:
+                        changepoints, probs = bocpd.detect_multivariate(series)
+                        
+                        train_results.append({
+                            'series_idx': idx,
+                            'country': info['country'],
+                            'industry': info['industry'],
+                            'n_changepoints': len(changepoints),
+                            'changepoint_years': [info['year_start'] + cp for cp in changepoints],
+                            'changepoint_probs': probs.tolist(),
+                            'mean_prob': float(np.mean(probs)),
+                            'max_prob': float(np.max(probs))
+                        })
+                    except Exception as e:
+                        print(f"\\nWarning: Error processing series {idx}: {e}")
+                        continue
+
+                print(f"\\nProcessed {len(train_results)} training series")
+
+                n_changepoints = [r['n_changepoints'] for r in train_results]
+                print(f"\\nTraining changepoint statistics:")
+                print(f"  Total: {sum(n_changepoints)}")
+                print(f"  Avg per series: {np.mean(n_changepoints):.2f}")
+                print(f"  Max per series: {max(n_changepoints)}")
+
+                print(f"\\n{'='*80}")
+                print("RUNNING BOCPD ON TEST DATA")
+                print(f"{'='*80}")
+
+                test_results = []
+
+                print(f"\\nProcessing {len(test_series)} test series...")
+
+                for idx, (series, info) in enumerate(tqdm(zip(test_series, test_info), total=len(test_series))):
+                    try:
+                        changepoints, probs = bocpd.detect_multivariate(series)
+                        
+                        test_results.append({
+                            'series_idx': idx,
+                            'country': info['country'],
+                            'industry': info['industry'],
+                            'n_changepoints': len(changepoints),
+                            'changepoint_years': [info['year_start'] + cp for cp in changepoints],
+                            'changepoint_probs': probs.tolist(),
+                            'mean_prob': float(np.mean(probs)),
+                            'max_prob': float(np.max(probs))
+                        })
+                    except Exception as e:
+                        print(f"\\nWarning: Error processing series {idx}: {e}")
+                        continue
+
+                print(f"\\nProcessed {len(test_results)} test series")
+
+                test_n_changepoints = [r['n_changepoints'] for r in test_results]
+                print(f"\\nTest changepoint statistics:")
+                print(f"  Total: {sum(test_n_changepoints)}")
+                print(f"  Avg per series: {np.mean(test_n_changepoints):.2f}" if test_n_changepoints else "  Avg per series: 0.00")
+                print(f"  Max per series: {max(test_n_changepoints)}" if test_n_changepoints else "  Max per series: 0")
+
+                if sum(test_n_changepoints) == 0:
+                    print(f"\\nWARNING: No test changepoints detected!")
+                    print(f"Checking max probabilities...")
+                    for i, res in enumerate(test_results[:5]):
+                        if res['changepoint_probs']:
+                            print(f"  Series {i}: max_prob = {res['max_prob']:.4f}")
+                    print(f"\\nConsider lowering threshold further to 0.2")
+
+                print(f"\\n{'='*80}")
+                print("SAVING BOCPD RESULTS")
+                print(f"{'='*80}")
+
+                output_dir = args.bocpd_results
+                os.makedirs(output_dir, exist_ok=True)
+
+                results_package = {
+                    'train_results': train_results,
+                    'test_results': test_results,
+                    'model_params': {
+                        'hazard_lambda': bocpd.hazard_lambda,
+                        'threshold': bocpd.threshold
+                    },
+                    'metadata': {
+                        'n_train_series': len(train_results),
+                        'n_test_series': len(test_results),
+                        'total_train_changepoints': sum(n_changepoints),
+                        'total_test_changepoints': sum(test_n_changepoints),
+                        'training_date': datetime.now().isoformat()
+                    }
+                }
+
+                results_path = os.path.join(output_dir, 'bocpd_results.pkl')
+                with open(results_path, 'wb') as f:
+                    pickle.dump(results_package, f)
+                print(f"\\nSaved: {results_path}")
+
+                summary = {
+                    'model': 'BOCPD',
+                    'train_series': len(train_results),
+                    'test_series': len(test_results),
+                    'train_changepoints': sum(n_changepoints),
+                    'test_changepoints': sum(test_n_changepoints),
+                    'model_params': results_package['model_params']
+                }
+
+                summary_path = os.path.join(output_dir, 'bocpd_summary.json')
+                with open(summary_path, 'w') as f:
+                    json.dump(summary, f, indent=2)
+                print(f"Saved: {summary_path}")
+
+                print(f"\\n{'='*80}")
+                print("BOCPD TRAINING COMPLETE")
+                print(f"{'='*80}")
+
+                print(f"\\nSummary:")
+                print(f"  Train series: {len(train_results)}")
+                print(f"  Test series: {len(test_results)}")
+                print(f"  Train changepoints: {sum(n_changepoints)}")
+                print(f"  Test changepoints: {sum(test_n_changepoints)}")
+
+                print(f"\\n{'='*80}")
+                print(f"Completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                print(f"{'='*80}")
+                
+            except Exception as e:
+                print(f"\\nError occurred: {e}")
+                import traceback
+                traceback.print_exc()
+                raise
+    args:
+      - --processed_data
+      - {inputPath: processed_data}
+      - --hazard_lambda
+      - {inputValue: hazard_lambda}
+      - --threshold
+      - {inputValue: threshold}
+      - --bocpd_results
+      - {outputPath: bocpd_results}
