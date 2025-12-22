@@ -1,4 +1,4 @@
-name: RuptureNet_CPD_Preprocessing
+name: Data_Preprocessing_RuptureNet_CPD
 description: Preprocesses time series data for RuptureNet CPD model - handles feature engineering, outlier detection, train/test splitting, and standardization using StandardScaler.
 inputs:
   - {name: input_csv, type: Dataset, description: "Path to input CSV file containing rupturenet features (1980-2024)"}
@@ -369,3 +369,4 @@ implementation:
       - {inputValue: outlier_clip_threshold}
       - --processed_data
       - {outputPath: processed_data}
+
