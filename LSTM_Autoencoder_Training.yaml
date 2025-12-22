@@ -14,7 +14,7 @@ outputs:
   - {name: lstm_results, type: Dataset, description: "Directory containing LSTM model and results"}
 implementation:
   container:
-    image: python:3.9
+    image: python:3.11
     command:
       - sh
       - -c
