@@ -60,53 +60,54 @@ implementation:
             args = parser.parse_args()
 
             try:
-                print("="*80)
+                sep = "=" * 80
+                print(sep)
                 print("RUPTURENET-CPD: DATA PREPROCESSING FOR MODEL TRAINING")
-                print("="*80)
+                print(sep)
                 timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                print("\nStarted: " + timestamp)
+                print("\\nStarted:", timestamp)
 
                 if os.path.isdir(args.input_csv):
                     input_file = os.path.join(args.input_csv, 'rupturenet_features_final_1980_2024.csv')
                 else:
                     input_file = args.input_csv
 
-                print("\n" + "="*80)
+                print("\\n" + sep)
                 print("LOADING DATASET")
-                print("="*80)
+                print(sep)
 
                 df = pd.read_csv(input_file)
-                print("\nLoaded dataset with shape: " + str(df.shape))
-                print("Columns (first 10): " + str(list(df.columns)[:10]))
+                print("\\nLoaded dataset with shape:", df.shape)
+                print("Columns (first 10):", list(df.columns)[:10])
 
-                print("\n" + "="*80)
+                print("\\n" + sep)
                 print("FEATURE SELECTION")
-                print("="*80)
+                print(sep)
 
                 available_features = [f for f in CORE_FEATURES if f in df.columns]
-                print("\nAvailable features: " + str(len(available_features)) + "/" + str(len(CORE_FEATURES)))
+                print("\\nAvailable features:", len(available_features), "/", len(CORE_FEATURES))
                 
                 if len(available_features) < len(CORE_FEATURES):
                     missing = [f for f in CORE_FEATURES if f not in df.columns]
-                    print("\nWarning - Missing features: " + str(missing))
+                    print("\\nWarning - Missing features:", missing)
                 
                 feature_cols = available_features
 
-                print("\n" + "="*80)
+                print("\\n" + sep)
                 print("FILTERING TIME SERIES")
-                print("="*80)
+                print(sep)
 
                 series_lengths = df.groupby(['country', 'industry']).size()
                 valid_series = series_lengths[series_lengths >= args.min_years].index
-                print("\nTotal series: " + str(len(series_lengths)))
-                print("Valid series (>=" + str(args.min_years) + " years): " + str(len(valid_series)))
+                print("\\nTotal series:", len(series_lengths))
+                print("Valid series (>=", args.min_years, "years):", len(valid_series))
 
                 df_filtered = df.set_index(['country', 'industry']).loc[valid_series].reset_index()
-                print("After filtering shape: " + str(df_filtered.shape))
+                print("After filtering shape:", df_filtered.shape)
 
-                print("\n" + "="*80)
+                print("\\n" + sep)
                 print("HANDLING MISSING VALUES")
-                print("="*80)
+                print(sep)
 
                 df_sorted = df_filtered.sort_values(['country', 'industry', 'year']).copy()
                 
@@ -118,11 +119,11 @@ implementation:
                         median_val = df_sorted[col].median()
                         df_sorted[col].fillna(median_val if not pd.isna(median_val) else 0, inplace=True)
 
-                print("All missing values imputed")
+                print("\\nAll missing values imputed")
 
-                print("\n" + "="*80)
+                print("\\n" + sep)
                 print("AUTOMATIC OUTLIER HANDLING")
-                print("="*80)
+                print(sep)
 
                 log_transformed = []
                 clipped = []
@@ -145,27 +146,27 @@ implementation:
                             df_sorted[col] = df_sorted[col].clip(lower=p001, upper=p999)
                             clipped.append(col)
 
-                print("\nLog-transformed: " + str(len(log_transformed)) + " features")
-                print("Clipped outliers: " + str(len(clipped)) + " features")
+                print("\\nLog-transformed:", len(log_transformed), "features")
+                print("Clipped outliers:", len(clipped), "features")
 
-                print("\n" + "="*80)
+                print("\\n" + sep)
                 print("REMOVING ZERO-VARIANCE FEATURES")
-                print("="*80)
+                print(sep)
 
                 feature_variance = df_sorted[feature_cols].var()
                 low_var_features = feature_variance[feature_variance < 1e-6].index.tolist()
 
                 if low_var_features:
-                    print("\nRemoving " + str(len(low_var_features)) + " zero-variance features:")
+                    print("\\nRemoving", len(low_var_features), "zero-variance features:")
                     for feat in low_var_features:
-                        print("  - " + feat)
+                        print("  -", feat)
                     feature_cols = [f for f in feature_cols if f not in low_var_features]
 
-                print("\nFinal feature count: " + str(len(feature_cols)))
+                print("\\nFinal feature count:", len(feature_cols))
 
-                print("\n" + "="*80)
+                print("\\n" + sep)
                 print("TRAIN/TEST SPLIT")
-                print("="*80)
+                print(sep)
 
                 train_data = []
                 test_data = []
@@ -186,24 +187,24 @@ implementation:
                 train_df = pd.concat(train_data, ignore_index=True)
                 test_df = pd.concat(test_data, ignore_index=True) if test_data else pd.DataFrame()
 
-                print("\nSplit complete:")
-                print("  Training: " + str(len(train_df)) + " records")
-                print("  Test: " + str(len(test_df)) + " records")
+                print("\\nSplit complete:")
+                print("  Training:", len(train_df), "records")
+                print("  Test:", len(test_df), "records")
 
                 if len(test_df) > 0:
                     test_lengths = test_df.groupby(['country', 'industry']).size()
-                    print("  Test series: min=" + str(test_lengths.min()) + ", max=" + str(test_lengths.max()) + 
-                          ", mean=" + str(round(test_lengths.mean(), 1)) + " years")
+                    print("  Test series: min=", test_lengths.min(), ", max=", test_lengths.max(), 
+                          ", mean=", round(test_lengths.mean(), 1), "years")
 
-                print("\n" + "="*80)
+                print("\\n" + sep)
                 print("STANDARDIZATION (StandardScaler)")
-                print("="*80)
+                print(sep)
 
                 scaler = StandardScaler()
 
-                print("\nBefore scaling (train):")
-                print("  Mean: " + str(round(train_df[feature_cols].mean().mean(), 2)))
-                print("  Std: " + str(round(train_df[feature_cols].std().mean(), 2)))
+                print("\\nBefore scaling (train):")
+                print("  Mean:", round(train_df[feature_cols].mean().mean(), 2))
+                print("  Std:", round(train_df[feature_cols].std().mean(), 2))
 
                 scaler.fit(train_df[feature_cols])
                 train_df[feature_cols] = scaler.transform(train_df[feature_cols])
@@ -211,25 +212,25 @@ implementation:
                 if len(test_df) > 0:
                     test_df[feature_cols] = scaler.transform(test_df[feature_cols])
 
-                print("\nAfter scaling (train):")
+                print("\\nAfter scaling (train):")
                 train_mean = train_df[feature_cols].mean().mean()
                 train_std = train_df[feature_cols].std().mean()
-                print("  Mean: " + str(round(train_mean, 4)) + " (target: 0.0000)")
-                print("  Std: " + str(round(train_std, 4)) + " (target: 1.0000)")
+                print("  Mean:", round(train_mean, 4), "(target: 0.0000)")
+                print("  Std:", round(train_std, 4), "(target: 1.0000)")
 
                 if abs(train_mean) < 0.01 and abs(train_std - 1) < 0.1:
-                    print("\nPERFECT STANDARDIZATION!")
+                    print("\\nPERFECT STANDARDIZATION!")
                 else:
-                    print("\nStandardization quality check")
+                    print("\\nStandardization quality check")
 
                 if len(test_df) > 0:
-                    print("\nAfter scaling (test):")
-                    print("  Mean: " + str(round(test_df[feature_cols].mean().mean(), 4)))
-                    print("  Std: " + str(round(test_df[feature_cols].std().mean(), 4)))
+                    print("\\nAfter scaling (test):")
+                    print("  Mean:", round(test_df[feature_cols].mean().mean(), 4))
+                    print("  Std:", round(test_df[feature_cols].std().mean(), 4))
 
-                print("\n" + "="*80)
+                print("\\n" + sep)
                 print("CREATING TENSORS")
-                print("="*80)
+                print(sep)
 
                 def create_tensors(df, label='train'):
                     series_data = []
@@ -251,16 +252,16 @@ implementation:
                         })
                     
                     lengths = np.array([len(ts) for ts in series_data])
-                    print("Created " + str(len(series_data)) + " " + label + " series (length: " + 
-                          str(lengths.min()) + "-" + str(lengths.max()) + ")")
+                    print("Created", len(series_data), label, "series (length:", 
+                          lengths.min(), "-", lengths.max(), ")")
                     return series_data, series_info
 
                 train_series, train_info = create_tensors(train_df, 'train')
                 test_series, test_info = create_tensors(test_df, 'test') if len(test_df) > 0 else ([], [])
 
-                print("\n" + "="*80)
+                print("\\n" + sep)
                 print("SAVING OUTPUT FILES")
-                print("="*80)
+                print(sep)
 
                 output_dir = args.processed_data
                 os.makedirs(output_dir, exist_ok=True)
@@ -291,66 +292,67 @@ implementation:
                 processed_data_path = os.path.join(output_dir, 'rupturenet_processed_data.pkl')
                 with open(processed_data_path, 'wb') as f:
                     pickle.dump(data_package, f)
-                print("Saved: " + processed_data_path)
+                print("Saved:", processed_data_path)
 
                 scaler_path = os.path.join(output_dir, 'rupturenet_scaler.pkl')
                 with open(scaler_path, 'wb') as f:
                     pickle.dump(scaler, f)
-                print("Saved: " + scaler_path)
+                print("Saved:", scaler_path)
 
                 metadata_path = os.path.join(output_dir, 'rupturenet_processed_metadata.json')
                 with open(metadata_path, 'w') as f:
                     json.dump(data_package['metadata'], f, indent=2)
-                print("Saved: " + metadata_path)
+                print("Saved:", metadata_path)
 
                 feature_list_path = os.path.join(output_dir, 'rupturenet_feature_list.json')
                 with open(feature_list_path, 'w') as f:
                     json.dump({'features': feature_cols}, f, indent=2)
-                print("Saved: " + feature_list_path)
+                print("Saved:", feature_list_path)
 
-                print("\n" + "="*80)
+                print("\\n" + sep)
                 print("PREPROCESSING SUMMARY")
-                print("="*80)
+                print(sep)
 
-                print("\nData Statistics:")
-                print("  Input records: " + str(len(df)))
-                print("  Filtered records: " + str(len(df_filtered)))
-                print("  Train records: " + str(len(train_df)))
-                print("  Test records: " + str(len(test_df)))
-                print("  Train series: " + str(len(train_series)))
-                print("  Test series: " + str(len(test_series)))
+                print("\\nData Statistics:")
+                print("  Input records:", len(df))
+                print("  Filtered records:", len(df_filtered))
+                print("  Train records:", len(train_df))
+                print("  Test records:", len(test_df))
+                print("  Train series:", len(train_series))
+                print("  Test series:", len(test_series))
 
-                print("\nFeature Engineering:")
-                print("  Total features: " + str(len(feature_cols)))
-                print("  Log-transformed: " + str(len(log_transformed)))
-                print("  Clipped: " + str(len(clipped)))
-                print("  Removed (zero-variance): " + str(len(low_var_features) if low_var_features else 0))
+                print("\\nFeature Engineering:")
+                print("  Total features:", len(feature_cols))
+                print("  Log-transformed:", len(log_transformed))
+                print("  Clipped:", len(clipped))
+                removed_count = len(low_var_features) if low_var_features else 0
+                print("  Removed (zero-variance):", removed_count)
 
-                print("\nScaling:")
+                print("\\nScaling:")
                 print("  Scaler: StandardScaler")
-                print("  Train mean: " + str(round(train_mean, 6)))
-                print("  Train std: " + str(round(train_std, 6)))
+                print("  Train mean:", round(train_mean, 6))
+                print("  Train std:", round(train_std, 6))
 
-                print("\nOutput Files:")
+                print("\\nOutput Files:")
                 print("  1. rupturenet_processed_data.pkl")
                 print("  2. rupturenet_scaler.pkl")
                 print("  3. rupturenet_processed_metadata.json")
                 print("  4. rupturenet_feature_list.json")
 
-                print("\nNEXT STEPS:")
+                print("\\nNEXT STEPS:")
                 print("  This preprocessed data is ready for:")
                 print("  1. BOCPD model training")
                 print("  2. LSTM Autoencoder training")
                 print("  3. Rupture detection pipeline")
 
-                print("\nPreprocessing complete!")
-                print("="*80)
+                print("\\nPreprocessing complete!")
+                print(sep)
                 timestamp_end = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                print("Completed: " + timestamp_end)
-                print("="*80)
+                print("Completed:", timestamp_end)
+                print(sep)
                 
             except Exception as e:
-                print("\nError occurred: " + str(e))
+                print("\\nError occurred:", str(e))
                 import traceback
                 traceback.print_exc()
                 raise
