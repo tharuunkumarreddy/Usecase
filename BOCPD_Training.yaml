@@ -13,8 +13,8 @@ implementation:
       - sh
       - -c
       - |
-        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet numpy pandas scipy tqdm || \
-        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet numpy pandas scipy tqdm --user
+        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet numpy pandas scipy scikit-learn tqdm || \
+        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet numpy pandas scipy scikit-learn tqdm --user
         exec "$0" "$@"
       - python3
       - -u
