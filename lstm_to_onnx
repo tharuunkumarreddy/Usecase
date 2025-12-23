@@ -3,8 +3,8 @@ description: Converts RuptureNet LSTM Autoencoder PyTorch model to ONNX format. 
 
 inputs:
   - name: lstm_model
-    type: Model
-    description: "LSTM checkpoint from training pipeline (.pth file or directory)"
+    type: Dataset
+    description: "LSTM checkpoint from training pipeline (Dataset with .pth file)"
   - name: processed_data  
     type: Dataset
     description: "Preprocessed data directory with rupturenet_processed_data.pkl"
@@ -20,13 +20,12 @@ outputs:
 
 implementation:
   container:
-    image: python:3.11
+    image: python:3.9
     command:
       - sh
       - -c
       - |
-        python3 -m pip install --upgrade pip setuptools wheel
-        python3 -m pip install numpy torch onnx onnxruntime
+        pip3 install --no-cache-dir numpy torch onnx onnxruntime
         exec "$0" "$@"
       - python3
       - -u
@@ -53,12 +52,12 @@ implementation:
         print("="*80)
         print("RUPTURENET LSTM TO ONNX CONVERSION")
         print("="*80)
-        print(f"Started: {datetime.now()}")
-        print(f"LSTM model path: {args.lstm_model}")
-        print(f"Processed data path: {args.processed_data}")
-        print(f"Output filename: {args.output_filename}")
+        now = datetime.now()
+        print("Started:", now.strftime("%Y-%m-%d %H:%M:%S"))
+        print("LSTM model path:", args.lstm_model)
+        print("Processed data path:", args.processed_data)
+        print("Output filename:", args.output_filename)
 
-        # LSTM AUTOENCODER DEFINITION
         class LSTMAutoencoder(nn.Module):
             def __init__(self, input_dim, hidden_dim, latent_dim, num_layers, dropout):
                 super().__init__()
@@ -109,38 +108,37 @@ implementation:
                 
                 return reconstructed, latent
 
-        # FLEXIBLE CHECKPOINT LOADING
         print("")
         print("="*80)
         print("LOADING CHECKPOINT")
         print("="*80)
         
         if os.path.isdir(args.lstm_model):
-            print(f"Input is directory: {args.lstm_model}")
+            print("Input is directory:", args.lstm_model)
             
             preferred = os.path.join(args.lstm_model, "lstm_autoencoder_best.pth")
             if os.path.isfile(preferred):
                 ckpt_path = preferred
-                print(f"Using preferred file: lstm_autoencoder_best.pth")
+                print("Using preferred file: lstm_autoencoder_best.pth")
             else:
-                candidates = glob.glob(os.path.join(args.lstm_model, "*.pth"))
+                candidates = glob.glob(os.path.join(args.lstm_model, "*.pth")) + glob.glob(os.path.join(args.lstm_model, "*.pt"))
                 if not candidates:
-                    raise FileNotFoundError(f"No .pth files found in {args.lstm_model}")
+                    raise FileNotFoundError("No .pth or .pt files found in " + args.lstm_model)
                 ckpt_path = candidates[0]
-                print(f"Using auto-detected file: {os.path.basename(ckpt_path)}")
+                print("Using auto-detected file:", os.path.basename(ckpt_path))
         else:
             ckpt_path = args.lstm_model
-            print(f"Input is file: {ckpt_path}")
+            print("Input is file:", ckpt_path)
         
         if not os.path.isfile(ckpt_path):
-            raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+            raise FileNotFoundError("Checkpoint not found: " + ckpt_path)
         
-        print(f"Loading checkpoint: {ckpt_path}")
-        print(f"File size: {os.path.getsize(ckpt_path) / 1024 / 1024:.2f} MB")
+        print("Loading checkpoint:", ckpt_path)
+        size_mb = os.path.getsize(ckpt_path) / 1024 / 1024
+        print("File size: {:.2f} MB".format(size_mb))
         
         checkpoint = torch.load(ckpt_path, map_location='cpu')
         
-        # EXTRACT CONFIG AND STATE_DICT
         print("")
         print("="*80)
         print("EXTRACTING CONFIGURATION")
@@ -165,21 +163,20 @@ implementation:
             state_dict = checkpoint
             print("Checkpoint is raw state_dict")
         
-        input_dim = config.get('input_dim', 85)
+        input_dim = config.get('input_dim', 10)
         hidden_dim = config.get('hidden_dim', 64)
         latent_dim = config.get('latent_dim', 32)
         num_layers = config.get('num_layers', 2)
         dropout = config.get('dropout', 0.2)
         
         print("")
-        print(f"Model configuration:")
-        print(f"  input_dim: {input_dim}")
-        print(f"  hidden_dim: {hidden_dim}")
-        print(f"  latent_dim: {latent_dim}")
-        print(f"  num_layers: {num_layers}")
-        print(f"  dropout: {dropout}")
+        print("Model configuration:")
+        print("  input_dim:", input_dim)
+        print("  hidden_dim:", hidden_dim)
+        print("  latent_dim:", latent_dim)
+        print("  num_layers:", num_layers)
+        print("  dropout:", dropout)
         
-        # CREATE MODEL AND LOAD WEIGHTS
         print("")
         print("="*80)
         print("CREATING MODEL")
@@ -191,9 +188,9 @@ implementation:
         missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
         
         if missing_keys:
-            print(f"Missing keys: {missing_keys}")
+            print("Missing keys:", missing_keys)
         if unexpected_keys:
-            print(f"Unexpected keys: {unexpected_keys}")
+            print("Unexpected keys:", unexpected_keys)
         
         if not missing_keys and not unexpected_keys:
             print("All keys matched perfectly")
@@ -201,7 +198,6 @@ implementation:
         model.eval()
         print("Model ready for export")
         
-        # LOAD SAMPLE DATA FOR DUMMY INPUT
         print("")
         print("="*80)
         print("LOADING SAMPLE DATA")
@@ -218,11 +214,10 @@ implementation:
         avg_seq_len = int(np.mean(seq_lengths))
         max_seq_len = max(seq_lengths)
         
-        print(f"Loaded {len(test_series)} test series")
-        print(f"Sequence lengths: avg={avg_seq_len}, max={max_seq_len}")
-        print(f"Features: {len(feature_names)}")
+        print("Loaded {} test series".format(len(test_series)))
+        print("Sequence lengths: avg={}, max={}".format(avg_seq_len, max_seq_len))
+        print("Features:", len(feature_names))
         
-        # CREATE ONNX WRAPPER FOR INFERENCE
         class ONNXWrapper(nn.Module):
             def __init__(self, model):
                 super().__init__()
@@ -238,17 +233,15 @@ implementation:
         print("")
         print("Created ONNX wrapper")
         
-        # CREATE DUMMY INPUTS
         batch_size = 2
         dummy_x = torch.randn(batch_size, max_seq_len, input_dim)
         dummy_seq_len = torch.tensor([max_seq_len, max_seq_len-5], dtype=torch.long)
         
         print("")
-        print(f"Dummy input shapes:")
-        print(f"  time_series: {dummy_x.shape} (batch, seq_len, features)")
-        print(f"  sequence_lengths: {dummy_seq_len.shape}")
+        print("Dummy input shapes:")
+        print("  time_series: {} (batch, seq_len, features)".format(dummy_x.shape))
+        print("  sequence_lengths:", dummy_seq_len.shape)
         
-        # EXPORT TO ONNX
         print("")
         print("="*80)
         print("EXPORTING TO ONNX")
@@ -257,30 +250,29 @@ implementation:
         os.makedirs(args.onnx_model, exist_ok=True)
         output_path = os.path.join(args.onnx_model, args.output_filename)
         
-        print(f"Exporting to: {output_path}")
+        print("Exporting to:", output_path)
         
         torch.onnx.export(
             wrapper,
             (dummy_x, dummy_seq_len),
             output_path,
             export_params=True,
-            opset_version=18,
+            opset_version=11,
             do_constant_folding=True,
-            input_names=['time_series', 'sequence_lengths'],
-            output_names=['reconstruction_error', 'latent_representation'],
+            input_names=['input', 'sequence_lengths'],
+            output_names=['reconstruction_error', 'latent'],
             dynamic_axes={
-                'time_series': {0: 'batch_size', 1: 'seq_len'},
+                'input': {0: 'batch_size', 1: 'seq_len'},
                 'sequence_lengths': {0: 'batch_size'},
                 'reconstruction_error': {0: 'batch_size', 1: 'seq_len'},
-                'latent_representation': {0: 'batch_size'}
+                'latent': {0: 'batch_size'}
             }
         )
         
         file_size = os.path.getsize(output_path) / 1024 / 1024
-        print(f"ONNX export complete")
-        print(f"  Size: {file_size:.2f} MB")
+        print("ONNX export complete")
+        print("  Size: {:.2f} MB".format(file_size))
         
-        # VALIDATE ONNX MODEL
         print("")
         print("="*80)
         print("VALIDATING ONNX MODEL")
@@ -293,7 +285,6 @@ implementation:
         onnx.checker.check_model(onnx_model)
         print("ONNX model structure is valid")
         
-        # TEST ONNX INFERENCE
         print("")
         print("Testing ONNX Runtime inference...")
         session = ort.InferenceSession(output_path)
@@ -312,9 +303,9 @@ implementation:
                 test_seq = np.array([seq_len] * batch, dtype=np.int64)
                 
                 outputs = session.run(
-                    ['reconstruction_error', 'latent_representation'],
+                    ['reconstruction_error', 'latent'],
                     {
-                        'time_series': test_x,
+                        'input': test_x,
                         'sequence_lengths': test_seq
                     }
                 )
@@ -322,9 +313,11 @@ implementation:
                 error_shape = outputs[0].shape
                 latent_shape = outputs[1].shape
                 
-                print(f"  Test [{batch}x{seq_len}x{input_dim}]: error={error_shape}, latent={latent_shape}")
+                msg = "  Test [{}x{}x{}]: error={}, latent={}"
+                print(msg.format(batch, seq_len, input_dim, error_shape, latent_shape))
             except Exception as e:
-                print(f"  Test [{batch}x{seq_len}x{input_dim}] FAILED: {e}")
+                msg = "  Test [{}x{}x{}] FAILED: {}"
+                print(msg.format(batch, seq_len, input_dim, str(e)))
                 all_passed = False
         
         if not all_passed:
@@ -333,7 +326,6 @@ implementation:
         print("")
         print("All inference tests passed")
         
-        # SAVE METADATA
         metadata = {
             'model_type': 'LSTM Autoencoder',
             'framework': 'PyTorch',
@@ -345,17 +337,17 @@ implementation:
                 'dropout': dropout
             },
             'onnx': {
-                'opset_version': 18,
+                'opset_version': 11,
                 'file_size_mb': file_size,
                 'filename': args.output_filename
             },
             'inputs': {
-                'time_series': f'[batch_size, seq_len, {input_dim}]',
+                'input': '[batch_size, seq_len, {0}]'.format(input_dim),
                 'sequence_lengths': '[batch_size]'
             },
             'outputs': {
                 'reconstruction_error': '[batch_size, seq_len]',
-                'latent_representation': f'[batch_size, {latent_dim}]'
+                'latent': '[batch_size, {0}]'.format(latent_dim)
             },
             'features': feature_names,
             'conversion_date': datetime.now().isoformat()
@@ -366,20 +358,20 @@ implementation:
             json.dump(metadata, f, indent=2)
         
         print("")
-        print(f"Saved metadata: {metadata_path}")
+        print("Saved metadata:", metadata_path)
         
-        # COMPLETE
         print("")
         print("="*80)
         print("CONVERSION COMPLETE")
         print("="*80)
         print("")
-        print(f"Output files:")
-        print(f"  {output_path}")
-        print(f"  {metadata_path}")
+        print("Output files:")
+        print(" ", output_path)
+        print(" ", metadata_path)
         print("")
-        print(f"Ready for KServe/Triton deployment!")
-        print(f"Completed: {datetime.now()}")
+        print("Ready for KServe/Triton deployment!")
+        end = datetime.now()
+        print("Completed:", end.strftime("%Y-%m-%d %H:%M:%S"))
         print("="*80)
 
     args:
