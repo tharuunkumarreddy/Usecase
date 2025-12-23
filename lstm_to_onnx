@@ -20,12 +20,12 @@ outputs:
 
 implementation:
   container:
-    image: python:3.9
+    image: nikhilv215/nesy-factory:testv2
     command:
       - sh
       - -c
       - |
-        pip3 install --no-cache-dir numpy torch onnx onnxruntime
+        pip3 install --no-cache-dir onnx onnxruntime
         exec "$0" "$@"
       - python3
       - -u
