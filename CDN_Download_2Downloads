@@ -1,0 +1,166 @@
+name: CDN Download Model and Data
+description: Downloads preprocessed data and PyTorch model file from CDN URLs and saves them locally with proper directory structure.
+inputs:
+  - {name: model_url, type: String, description: "CDN URL to fetch the .pt/.pth model file"}
+  - {name: data_url, type: String, description: "CDN URL to fetch the preprocessed data file (.pkl)"}
+outputs:
+  - {name: model_file, type: Dataset, description: "Downloaded PyTorch model file"}
+  - {name: data_file, type: Dataset, description: "Downloaded preprocessed data file"}
+implementation:
+  container:
+    image: python:3.9
+    command:
+      - sh
+      - -c
+      - |
+        pip3 install --no-cache-dir requests
+        exec "$0" "$@"
+      - python3
+      - -u
+      - -c
+      - |
+        import argparse
+        import os
+        import requests
+        from datetime import datetime
+        
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--model_url', type=str, required=True)
+        parser.add_argument('--model_file', type=str, required=True)
+        parser.add_argument('--data_url', type=str, required=True)
+        parser.add_argument('--data_file', type=str, required=True)
+        
+        args = parser.parse_args()
+        
+        print("="*80)
+        print("CDN DOWNLOAD: MODEL AND DATA")
+        print("="*80)
+        print("\\nStarted:", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        
+        print("\\nInput URLs:")
+        print("  Model URL:", args.model_url)
+        print("  Data URL:", args.data_url)
+        
+        try:
+            # Download PyTorch model file
+            print("\\n" + "="*80)
+            print("DOWNLOADING MODEL FILE")
+            print("="*80)
+            print("\\nFetching model from CDN...")
+            
+            resp_model = requests.get(args.model_url, timeout=300, stream=True)
+            resp_model.raise_for_status()
+            
+            # Determine file extension from URL or default to .pth
+            model_filename = 'model.pth'
+            if args.model_url.endswith('.pt'):
+                model_filename = 'model.pt'
+            elif args.model_url.endswith('.pth'):
+                model_filename = 'model.pth'
+            
+            os.makedirs(args.model_file, exist_ok=True)
+            model_path = os.path.join(args.model_file, model_filename)
+            
+            # Download with progress indication
+            total_size = int(resp_model.headers.get('content-length', 0))
+            print("Total size:", total_size, "bytes ({:.2f} MB)".format(total_size / 1024 / 1024))
+            
+            downloaded = 0
+            chunk_size = 8192
+            with open(model_path, "wb") as f:
+                for chunk in resp_model.iter_content(chunk_size=chunk_size):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total_size > 0:
+                            percent = (downloaded / total_size) * 100
+                            print("\\rProgress: {:.1f}%".format(percent), end='', flush=True)
+            
+            print("\\n\\nModel file saved at:", model_path)
+            actual_size = os.path.getsize(model_path)
+            print("Model file size:", actual_size, "bytes ({:.2f} MB)".format(actual_size / 1024 / 1024))
+            
+            # Download preprocessed data file
+            print("\\n" + "="*80)
+            print("DOWNLOADING PREPROCESSED DATA")
+            print("="*80)
+            print("\\nFetching data from CDN...")
+            
+            resp_data = requests.get(args.data_url, timeout=300, stream=True)
+            resp_data.raise_for_status()
+            
+            # Determine file extension from URL or default to .pkl
+            data_filename = 'rupturenet_processed_data.pkl'
+            if '.csv' in args.data_url.lower():
+                data_filename = 'data.csv'
+            elif '.pkl' in args.data_url.lower():
+                data_filename = 'rupturenet_processed_data.pkl'
+            
+            os.makedirs(args.data_file, exist_ok=True)
+            data_path = os.path.join(args.data_file, data_filename)
+            
+            # Download with progress indication
+            total_size_data = int(resp_data.headers.get('content-length', 0))
+            print("Total size:", total_size_data, "bytes ({:.2f} MB)".format(total_size_data / 1024 / 1024))
+            
+            downloaded_data = 0
+            with open(data_path, "wb") as f:
+                for chunk in resp_data.iter_content(chunk_size=chunk_size):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded_data += len(chunk)
+                        if total_size_data > 0:
+                            percent = (downloaded_data / total_size_data) * 100
+                            print("\\rProgress: {:.1f}%".format(percent), end='', flush=True)
+            
+            print("\\n\\nData file saved at:", data_path)
+            actual_data_size = os.path.getsize(data_path)
+            print("Data file size:", actual_data_size, "bytes ({:.2f} MB)".format(actual_data_size / 1024 / 1024))
+            
+            # Verification
+            print("\\n" + "="*80)
+            print("VERIFICATION")
+            print("="*80)
+            
+            print("\\nOutput structure:")
+            print("  - model_file/" + model_filename)
+            print("  - data_file/" + data_filename)
+            
+            # Verify files exist and have content
+            if os.path.exists(model_path) and os.path.getsize(model_path) > 0:
+                print("\\nModel file: OK")
+            else:
+                raise Exception("Model file download verification failed")
+                
+            if os.path.exists(data_path) and os.path.getsize(data_path) > 0:
+                print("Data file: OK")
+            else:
+                raise Exception("Data file download verification failed")
+            
+            print("\\n" + "="*80)
+            print("DOWNLOAD COMPLETE")
+            print("="*80)
+            print("\\nAll files downloaded and verified successfully!")
+            print("Completed:", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                
+        except requests.exceptions.Timeout:
+            print("\\nError: Request timed out while downloading from CDN")
+            exit(1)
+        except requests.exceptions.RequestException as e:
+            print("\\nError: Network error during download:", str(e))
+            exit(1)
+        except Exception as e:
+            print("\\nError: Failed to download files:", str(e))
+            import traceback
+            traceback.print_exc()
+            exit(1)
+
+    args:
+      - --model_url
+      - {inputValue: model_url}
+      - --model_file
+      - {outputPath: model_file}
+      - --data_url
+      - {inputValue: data_url}
+      - --data_file
+      - {outputPath: data_file}
