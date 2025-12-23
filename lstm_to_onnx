@@ -245,7 +245,7 @@ implementation:
         # CREATE ONNX WRAPPER FOR INFERENCE
         # ================================================================
         class ONNXWrapper(nn.Module):
-            """Wrapper that outputs reconstruction error and latent"""
+            #Wrapper that outputs reconstruction error and latent#
             def __init__(self, model):
                 super().__init__()
                 self.model = model
