@@ -1,0 +1,67 @@
+name: Upload Model one123
+description: Upload config.pbtxt and ONNX model file to MinIO with Triton directory structure
+inputs:
+- {name: Config file}
+- {name: ONNX file}
+- {name: MinIO bucket name, type: String}
+- {name: Model name, type: String}
+- {name: MinIO username, type: String}
+- {name: MinIO password, type: String}
+outputs:
+- {name: MinIO path, type: String}
+metadata:
+  annotations:
+    author: Nikhil <nikhil.v@mobiusdtaas.ai>
+implementation:
+    container:
+        image: ubuntu:22.04
+        command:
+        - sh
+        - -ex
+        - -c
+        - |
+            # Update and install wget
+            apt-get -o Acquire::ForceIPv4=true update
+            apt-get -o Acquire::ForceIPv4=true install -y wget
+            
+            # Download and install MinIO client
+            wget https://dl.min.io/client/mc/release/linux-amd64/mc
+            chmod +x mc
+            mv mc /usr/local/bin/
+            
+            # Set up MinIO alias with provided credentials
+            mc alias set myminio http://minio-service.kubeflow.svc.cluster.local:9000 "$4" "$5"
+            
+            # Check if bucket exists, if not create it
+            if ! mc ls myminio/"$2"; then
+              mc mb myminio/"$2"
+            fi
+            
+            # Handle config file - check if it's a directory or file
+            if [ -d "$0" ]; then
+              # If it's a directory, copy the first file found
+              CONFIG_FILE=$(find "$0" -type f | head -n 1)
+              mc cp "$CONFIG_FILE" "myminio/$2/$3/config.pbtxt"
+            else
+              mc cp "$0" "myminio/$2/$3/config.pbtxt"
+            fi
+            
+            # Handle ONNX file - check if it's a directory or file
+            if [ -d "$1" ]; then
+              # If it's a directory, copy the first file found
+              ONNX_FILE=$(find "$1" -name "*.onnx" -type f | head -n 1)
+              mc cp "$ONNX_FILE" "myminio/$2/$3/1/model.onnx"
+            else
+              mc cp "$1" "myminio/$2/$3/1/model.onnx"
+            fi
+            
+            # CRITICAL FIX: Include model name in output path
+            mkdir -p "$(dirname "$6")"
+            echo "s3://$2/$3/" > "$6"
+        - inputPath: Config file
+        - inputPath: ONNX file
+        - inputValue: MinIO bucket name
+        - inputValue: Model name
+        - inputValue: MinIO username
+        - inputValue: MinIO password
+        - outputPath: MinIO path
