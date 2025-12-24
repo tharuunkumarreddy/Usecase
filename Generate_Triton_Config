@@ -1,6 +1,5 @@
-name: Generate_Triton_Config
-description: Generates Triton Inference Server config.pbtxt for RuptureNet LSTM. Based on MPQE config structure with proper Triton format. FIXED to match ONNX output names exactly.
-
+name: Generate_Triton_Config_Fixed
+description: Generates Triton Inference Server config.pbtxt for RuptureNet LSTM. Based on MPQE config structure with proper Triton format.
 inputs:
   - name: processed_data
     type: Dataset
@@ -13,12 +12,10 @@ inputs:
     type: Integer
     default: "32"
     description: "Maximum batch size"
-
 outputs:
   - name: config_file
     type: String
     description: "Generated config.pbtxt file"
-
 implementation:
   container:
     image: nikhilv215/nesy-factory:testv2
@@ -48,7 +45,8 @@ implementation:
         print("="*80)
         
         data_path = os.path.join(args.processed_data, 'rupturenet_processed_data.pkl')
-        print("\nLoading data from:", data_path)
+        print("")
+        print("Loading data from:", data_path)
         
         with open(data_path, 'rb') as f:
             data = pickle.load(f)
@@ -56,19 +54,17 @@ implementation:
         input_dim = len(data['feature_names'])
         latent_dim = 32
         
-        print("\nConfiguration:")
+        print("")
+        print("Configuration:")
         print("  Model name:", args.model_name)
         print("  Input dimension:", input_dim)
         print("  Latent dimension:", latent_dim)
         print("  Max batch size:", args.max_batch_size)
         
-        # Generate config.pbtxt matching ONNX model exactly
         config_lines = []
         config_lines.append('name: "{0}"'.format(args.model_name))
         config_lines.append('backend: "onnxruntime"')
         config_lines.append('max_batch_size: {0}'.format(args.max_batch_size))
-        
-        # Input configuration - MUST match ONNX input names
         config_lines.append('input [')
         config_lines.append('  {')
         config_lines.append('    name: "input"')
@@ -81,43 +77,36 @@ implementation:
         config_lines.append('    dims: [1]')
         config_lines.append('  }')
         config_lines.append(']')
-        
-        # Output configuration - MUST match ONNX output names EXACTLY
         config_lines.append('output [')
         config_lines.append('  {')
-        config_lines.append('    name: "reconstruction_error"')  # FIXED: Matches ONNX output
+        config_lines.append('    name: "reconstruction_error"')
         config_lines.append('    data_type: TYPE_FP32')
-        config_lines.append('    dims: [-1]')  # FIXED: Per-timestep error [seq_len]
+        config_lines.append('    dims: [-1]')
         config_lines.append('  },')
         config_lines.append('  {')
-        config_lines.append('    name: "latent"')  # FIXED: Matches ONNX output
+        config_lines.append('    name: "latent"')
         config_lines.append('    data_type: TYPE_FP32')
         config_lines.append('    dims: [{0}]'.format(latent_dim))
         config_lines.append('  }')
         config_lines.append(']')
-        
-        # Instance group configuration
         config_lines.append('instance_group [')
         config_lines.append('  {')
         config_lines.append('    count: 1')
         config_lines.append('    kind: KIND_CPU')
         config_lines.append('  }')
         config_lines.append(']')
-        
-        # Dynamic batching configuration
         config_lines.append('dynamic_batching {')
         config_lines.append('  preferred_batch_size: [4, 8, 16, 32]')
         config_lines.append('  max_queue_delay_microseconds: 100')
         config_lines.append('}')
-        
-        # Version policy
         config_lines.append('version_policy {')
         config_lines.append('  latest {')
         config_lines.append('    num_versions: 1')
         config_lines.append('  }')
         config_lines.append('}')
         
-        config_content = '\n'.join(config_lines)
+        newline = chr(10)
+        config_content = newline.join(config_lines)
         
         output_dir = os.path.dirname(args.config_file)
         if output_dir:
@@ -126,12 +115,15 @@ implementation:
         with open(args.config_file, 'w') as f:
             f.write(config_content)
         
-        print("\nGenerated config.pbtxt at:", args.config_file)
+        print("")
+        print("Generated config.pbtxt at:", args.config_file)
         print("File size:", os.path.getsize(args.config_file), "bytes")
         
         if os.path.exists(args.config_file):
-            print("\nVerification: OK")
-            print("\nConfig content:")
+            print("")
+            print("Verification: OK")
+            print("")
+            print("Config content:")
             print("-" * 40)
             with open(args.config_file, 'r') as f:
                 print(f.read())
@@ -139,7 +131,8 @@ implementation:
         else:
             raise Exception("Failed to create config file")
         
-        print("\n" + "="*80)
+        print("")
+        print("="*80)
         print("COMPLETE")
         print("="*80)
         
